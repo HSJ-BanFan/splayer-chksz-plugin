@@ -4,6 +4,10 @@
 
 这是一个可导入 SPlayer-Next 的原生 `source` 插件，使用 ChKSz API 为 SPlayer-Next 的网易云、QQ 音乐和酷狗歌曲解析播放地址，并在内置歌词/封面没有命中时提供兜底。
 
+## 依赖项目
+
+本插件依赖 [SPlayer-Next](https://github.com/SPlayer-Dev/SPlayer-Next) 提供插件运行环境及音源接口。
+
 ## 支持范围
 
 | SPlayer 来源 | ChKSz 接口 | 说明 |
