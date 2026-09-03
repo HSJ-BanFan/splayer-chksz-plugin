@@ -1,0 +1,168 @@
+import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
+import { test } from "node:test";
+import vm from "node:vm";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+
+const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const pluginSource = await readFile(resolve(projectRoot, "src", "plugin.js"), "utf8");
+
+const loadPlugin = ({ apiKey = "chksz_test_key", response }) => {
+  const registration = {};
+  const handlers = {};
+  const requests = [];
+  const settings = { apiKey };
+
+  const splayer = {
+    register(args) {
+      Object.assign(registration, args);
+    },
+    on(action, handler) {
+      handlers[action] = handler;
+    },
+    getSetting(key) {
+      return settings[key];
+    },
+    async request(url, options) {
+      requests.push({ url, options });
+      return typeof response === "function" ? response(new URL(url), options) : response;
+    },
+    log: {
+      debug() {},
+      info() {},
+      warn() {},
+      error() {},
+    },
+  };
+
+  vm.runInNewContext(pluginSource, {
+    splayer,
+    URL,
+    Promise,
+    console,
+    setTimeout,
+    clearTimeout,
+  });
+
+  return { registration, handlers, requests };
+};
+
+test("registers all three SPlayer platform sources and a local key setting", () => {
+  const { registration } = loadPlugin({ response: { status: 200, body: {} } });
+
+  assert.deepEqual(Object.keys(registration.sources), ["wy", "tx", "kg"]);
+  assert.deepEqual([...registration.sources.wy.actions], ["musicUrl", "musicLyric", "musicPic"]);
+  assert.equal(registration.settings[0].key, "apiKey");
+  assert.equal(registration.settings[0].type, "text");
+});
+
+test("contains publishable plugin metadata and network permission", () => {
+  assert.match(pluginSource, /@id\s+chksz\.splayer-source/);
+  assert.match(pluginSource, /@type\s+source/);
+  assert.match(pluginSource, /@grant\s+network/);
+  assert.match(
+    pluginSource,
+    /@updateUrl\s+https:\/\/raw\.githubusercontent\.com\/HSJ-BanFan\/splayer-chksz-plugin/,
+  );
+});
+
+test("maps NetEase lossless requests to the ChKSz 163 endpoint", async () => {
+  const { handlers, requests } = loadPlugin({
+    response: { status: 200, body: { url: "https://cdn.example.test/song.flac", expire: 1_800_000_000 } },
+  });
+
+  const result = await handlers.musicUrl({
+    source: "wy",
+    quality: "lossless",
+    musicInfo: { songmid: "2034742057" },
+  });
+
+  const requestUrl = new URL(requests[0].url);
+  assert.equal(requestUrl.pathname, "/api/163_music");
+  assert.equal(requestUrl.searchParams.get("id"), "2034742057");
+  assert.equal(requestUrl.searchParams.get("level"), "lossless");
+  assert.equal(requestUrl.searchParams.get("type"), "json");
+  assert.equal(requestUrl.searchParams.get("apikey"), "chksz_test_key");
+  assert.equal(result.url, "https://cdn.example.test/song.flac");
+  assert.equal(result.quality, "lossless");
+  assert.equal(result.expire, 1_800_000_000_000);
+});
+
+test("maps QQ and Kugou IDs and native quality values", async () => {
+  const { handlers, requests } = loadPlugin({
+    response: (url) => ({ status: 200, body: { url: `https://cdn.example.test/${url.pathname}.mp3` } }),
+  });
+
+  await handlers.musicUrl({
+    source: "tx",
+    quality: "hq",
+    musicInfo: { songmid: "qq-mid-1" },
+  });
+  await handlers.musicUrl({
+    source: "kg",
+    quality: "hi-res",
+    musicInfo: { id: "kg-id-1" },
+  });
+
+  const qqUrl = new URL(requests[0].url);
+  assert.equal(qqUrl.pathname, "/api/qq_music");
+  assert.equal(qqUrl.searchParams.get("mid"), "qq-mid-1");
+  assert.equal(qqUrl.searchParams.get("size"), "320k");
+
+  const kugouUrl = new URL(requests[1].url);
+  assert.equal(kugouUrl.pathname, "/api/kugou_music");
+  assert.equal(kugouUrl.searchParams.get("id"), "kg-id-1");
+  assert.equal(kugouUrl.searchParams.get("size"), "hires");
+});
+
+test("parses NetEase lyrics and translation", async () => {
+  const { handlers } = loadPlugin({
+    response: {
+      status: 200,
+      body: {
+        lrc: { lyric: "[00:01.00]主歌词" },
+        tlyric: { lyric: "[00:01.00]译文" },
+        yrc: { lyric: "[0,100](主歌词)" },
+      },
+    },
+  });
+
+  const result = await handlers.musicLyric({
+    source: "wy",
+    musicInfo: { id: "123" },
+  });
+
+  assert.equal(result.lyric, "[00:01.00]主歌词");
+  assert.equal(result.tlyric, "[00:01.00]译文");
+  assert.equal(result.awlyric, "[0,100](主歌词)");
+});
+
+test("surfaces HTTP errors and Retry-After without retrying", async () => {
+  const { handlers, requests } = loadPlugin({
+    response: {
+      status: 429,
+      headers: { "retry-after": "42" },
+      body: { msg: "请求过于频繁" },
+    },
+  });
+
+  await assert.rejects(
+    handlers.musicUrl({ source: "wy", quality: "hq", musicInfo: { id: "123" } }),
+    (error) =>
+      error.code === "CHKSZ_HTTP_429" &&
+      error.message.includes("请求过于频繁") &&
+      error.message.includes("42 秒"),
+  );
+  assert.equal(requests.length, 1);
+});
+
+test("fails before making a request when the API key is missing", async () => {
+  const { handlers, requests } = loadPlugin({ apiKey: "" });
+
+  await assert.rejects(
+    handlers.musicUrl({ source: "wy", quality: "hq", musicInfo: { id: "123" } }),
+    (error) => error.code === "CHKSZ_CONFIG_MISSING",
+  );
+  assert.equal(requests.length, 0);
+});

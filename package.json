@@ -1,0 +1,24 @@
+{
+  "name": "splayer-chksz-plugin",
+  "version": "0.1.0",
+  "private": true,
+  "description": "ChKSz playback source plugin for SPlayer-Next",
+  "license": "MIT",
+  "homepage": "https://github.com/HSJ-BanFan/splayer-chksz-plugin",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/HSJ-BanFan/splayer-chksz-plugin.git"
+  },
+  "bugs": {
+    "url": "https://github.com/HSJ-BanFan/splayer-chksz-plugin/issues"
+  },
+  "type": "module",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "check": "node --check src/plugin.js && node --check dist/chksz.splayer-source.js",
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
