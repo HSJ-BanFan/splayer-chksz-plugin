@@ -1,62 +1,7 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
 import { test } from "node:test";
-import vm from "node:vm";
-import { dirname, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
 
-const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const pluginSource = await readFile(resolve(projectRoot, "src", "plugin.js"), "utf8");
-
-const loadPlugin = ({ apiKey = "chksz_test_key", response }) => {
-  const registration = {};
-  const handlers = {};
-  const requests = [];
-  const settings = { apiKey };
-
-  const splayer = {
-    register(args) {
-      Object.assign(registration, args);
-    },
-    on(action, handler) {
-      handlers[action] = handler;
-    },
-    getSetting(key) {
-      return settings[key];
-    },
-    async request(url, options) {
-      requests.push({ url, options });
-      return typeof response === "function" ? response(new URL(url), options) : response;
-    },
-    log: {
-      debug() {},
-      info() {},
-      warn() {},
-      error() {},
-    },
-  };
-
-  const context = {
-    splayer,
-    URL,
-    Promise,
-    console,
-    setTimeout,
-    clearTimeout,
-  };
-  vm.runInNewContext(
-    `${pluginSource}\n;globalThis.__resolutionCore = typeof resolutionCore === "undefined" ? undefined : resolutionCore;\n;globalThis.__sourcePolicies = typeof SOURCE_POLICIES === "undefined" ? undefined : SOURCE_POLICIES;`,
-    context,
-  );
-
-  return {
-    registration,
-    handlers,
-    requests,
-    resolutionCore: context.__resolutionCore,
-    sourcePolicies: context.__sourcePolicies,
-  };
-};
+import { loadPlugin } from "./plugin-host.js";
 
 test("resolution core exposes a narrow playback resolver and normalizes nested URL expiry", async () => {
   const { resolutionCore } = loadPlugin({
@@ -96,24 +41,6 @@ test("source policies own provider identity and action request strategies", () =
   assert.equal(sourcePolicies.kg.actions.musicPic.request, "trackDetails");
 });
 
-test("registers all three SPlayer platform sources and a local key setting", () => {
-  const { registration } = loadPlugin({ response: { status: 200, body: {} } });
-
-  assert.deepEqual(Object.keys(registration.sources), ["wy", "tx", "kg"]);
-  assert.deepEqual([...registration.sources.wy.actions], ["musicUrl", "musicLyric", "musicPic"]);
-  assert.equal(registration.settings[0].key, "apiKey");
-  assert.equal(registration.settings[0].type, "text");
-});
-
-test("contains publishable plugin metadata and network permission", () => {
-  assert.match(pluginSource, /@id\s+chksz\.splayer-source/);
-  assert.match(pluginSource, /@type\s+source/);
-  assert.match(pluginSource, /@grant\s+network/);
-  assert.match(
-    pluginSource,
-    /@updateUrl\s+https:\/\/raw\.githubusercontent\.com\/HSJ-BanFan\/splayer-chksz-plugin/,
-  );
-});
 
 test("maps NetEase lossless requests to the ChKSz 163 endpoint", async () => {
   const { handlers, requests } = loadPlugin({

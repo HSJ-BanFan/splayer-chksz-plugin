@@ -390,7 +390,18 @@ const getCover = async ({ source, musicInfo }) => {
   return { url: /^https?:\/\//i.test(cover) ? cover : "" };
 };
 
-splayer.register({
+const createRuntimeAdapter = (runtime) => ({
+  register(metadata) {
+    runtime.register(metadata);
+  },
+  bind({ musicUrl, musicLyric, musicPic }) {
+    runtime.on("musicUrl", musicUrl);
+    runtime.on("musicLyric", musicLyric);
+    runtime.on("musicPic", musicPic);
+  },
+});
+const runtimeAdapter = createRuntimeAdapter(splayer);
+runtimeAdapter.register({
   sources: Object.fromEntries(
     Object.entries(SOURCE_POLICIES).map(([source, policy]) => [
       source,
@@ -412,7 +423,4 @@ splayer.register({
     },
   ],
 });
-
-splayer.on("musicUrl", resolveUrl);
-splayer.on("musicLyric", getLyric);
-splayer.on("musicPic", getCover);
+runtimeAdapter.bind({ musicUrl: resolveUrl, musicLyric: getLyric, musicPic: getCover });
