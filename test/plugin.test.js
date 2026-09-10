@@ -36,17 +36,36 @@ const loadPlugin = ({ apiKey = "chksz_test_key", response }) => {
     },
   };
 
-  vm.runInNewContext(pluginSource, {
+  const context = {
     splayer,
     URL,
     Promise,
     console,
     setTimeout,
     clearTimeout,
-  });
+  };
+  vm.runInNewContext(
+    `${pluginSource}\n;globalThis.__resolutionCore = typeof resolutionCore === "undefined" ? undefined : resolutionCore;`,
+    context,
+  );
 
-  return { registration, handlers, requests };
+  return { registration, handlers, requests, resolutionCore: context.__resolutionCore };
 };
+
+test("resolution core exposes a narrow playback resolver and normalizes nested URL expiry", async () => {
+  const { resolutionCore } = loadPlugin({
+    response: {
+      status: 200,
+      body: { data: { url: " https://cdn.example.test/song.mp3 ", expires_at: "1800000000" } },
+    },
+  });
+  assert.ok(resolutionCore);
+  assert.deepEqual(Object.keys(resolutionCore), ["resolve"]);
+  const result = await resolutionCore.resolve({ source: "tx", quality: "hq", id: "qq-mid-1" });
+  assert.equal(result.url, "https://cdn.example.test/song.mp3");
+  assert.equal(result.quality, "hq");
+  assert.equal(result.expire, 1_800_000_000_000);
+});
 
 test("registers all three SPlayer platform sources and a local key setting", () => {
   const { registration } = loadPlugin({ response: { status: 200, body: {} } });
