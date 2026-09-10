@@ -11,6 +11,7 @@ const sourcePath = resolve(projectRoot, "src", "plugin.js");
 const distPath = resolve(projectRoot, "dist", "chksz.splayer-source.js");
 const parityScript = resolve(projectRoot, "scripts", "check-dist.mjs");
 const artifactScript = resolve(projectRoot, "scripts", "check-artifact.mjs");
+const workflowPath = resolve(projectRoot, ".github", "workflows", "ci.yml");
 
 const runScript = (script, ...args) =>
   spawnSync(process.execPath, [script, ...args], {
@@ -38,6 +39,21 @@ test("parity check accepts identical bytes and rejects a stale artifact", () => 
   } finally {
     rmSync(tempRoot, { recursive: true, force: true });
   }
+});
+
+test("CI guards the tracked distribution artifact after build", () => {
+  const workflow = readFileSync(workflowPath, "utf8").replaceAll("\r\n", "\n");
+  const steps = [
+    "run: npm run build",
+    "run: git diff --exit-code -- dist/chksz.splayer-source.js",
+    "run: npm run check:dist",
+    "run: npm run check:artifact",
+    "run: npm test",
+    "run: npm run check",
+  ].map((step) => workflow.indexOf(`        ${step}\n`));
+
+  assert.ok(steps.every((index) => index >= 0));
+  assert.ok(steps.every((index, position) => position === 0 || steps[position - 1] < index));
 });
 
 test("artifact check loads the built distribution through the shared VM host", () => {

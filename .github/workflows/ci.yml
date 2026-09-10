@@ -21,6 +21,8 @@ jobs:
           node-version: 20
       - name: Build plugin
         run: npm run build
+      - name: Verify tracked distribution artifact unchanged by build
+        run: git diff --exit-code -- dist/chksz.splayer-source.js
       - name: Verify source and distribution parity
         run: npm run check:dist
       - name: Smoke-test distribution artifact
