@@ -16,6 +16,8 @@
   "scripts": {
     "build": "node scripts/build.mjs",
     "check": "node --check src/plugin.js && node --check dist/chksz.splayer-source.js",
+    "check:dist": "node scripts/check-dist.mjs",
+    "check:artifact": "node scripts/check-artifact.mjs",
     "test": "node --test"
   },
   "engines": {

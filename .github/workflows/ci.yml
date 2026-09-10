@@ -21,6 +21,10 @@ jobs:
           node-version: 20
       - name: Build plugin
         run: npm run build
+      - name: Verify source and distribution parity
+        run: npm run check:dist
+      - name: Smoke-test distribution artifact
+        run: npm run check:artifact
       - name: Run tests
         run: npm test
       - name: Check JavaScript syntax
