@@ -89,6 +89,90 @@ test("maps NetEase lossless requests to the ChKSz 163 endpoint", async () => {
   assert.equal(result.expire, 1_800_000_000_000);
 });
 
+test("falls back to standard NetEase quality when the requested level is unavailable", async () => {
+  const requestedLevels = [];
+  const { handlers, requests } = loadPlugin({
+    response: (url) => {
+      const level = url.searchParams.get("level");
+      requestedLevels.push(level);
+
+      if (level === "exhigh") {
+        return {
+          status: 404,
+          body: { msg: "Music URL not found, song may be unavailable at this quality level" },
+        };
+      }
+
+      return { status: 200, body: { url: "https://cdn.example.test/song.mp3" } };
+    },
+  });
+
+  const result = await handlers.musicUrl({
+    source: "wy",
+    quality: "hq",
+    musicInfo: { id: "issue-track-id" },
+  });
+
+  assert.deepEqual(requestedLevels, ["exhigh", "standard"]);
+  assert.equal(requests.length, 2);
+  assert.equal(result.url, "https://cdn.example.test/song.mp3");
+  assert.equal(result.quality, "lq");
+});
+
+test("does not retry unrelated NetEase 404 responses", async () => {
+  const { handlers, requests } = loadPlugin({
+    response: { status: 404, body: { msg: "Endpoint not found" } },
+  });
+
+  await assert.rejects(
+    handlers.musicUrl({ source: "wy", quality: "hq", musicInfo: { id: "123" } }),
+    (error) => error.code === "CHKSZ_HTTP_404",
+  );
+  assert.equal(requests.length, 1);
+});
+
+test("does not retry 404 responses without the complete quality-unavailable message", async () => {
+  for (const message of ["Music URL not found", "song unavailable at this quality level"]) {
+    const { handlers, requests } = loadPlugin({
+      response: { status: 404, body: { msg: message } },
+    });
+
+    await assert.rejects(
+      handlers.musicUrl({ source: "wy", quality: "hq", musicInfo: { id: "123" } }),
+      (error) => error.code === "CHKSZ_HTTP_404",
+    );
+    assert.equal(requests.length, 1, message);
+  }
+});
+
+test("falls through the supported NetEase quality ladder and reports the effective quality", async () => {
+  const requestedLevels = [];
+  const { handlers } = loadPlugin({
+    response: (url) => {
+      const level = url.searchParams.get("level");
+      requestedLevels.push(level);
+
+      if (["hires", "lossless", "exhigh"].includes(level)) {
+        return {
+          status: 404,
+          body: { msg: "Music URL not found, song may be unavailable at this quality level" },
+        };
+      }
+
+      return { status: 200, body: { url: "https://cdn.example.test/song.mp3" } };
+    },
+  });
+
+  const result = await handlers.musicUrl({
+    source: "wy",
+    quality: "hi-res",
+    musicInfo: { id: "123" },
+  });
+
+  assert.deepEqual(requestedLevels, ["hires", "lossless", "exhigh", "standard"]);
+  assert.equal(result.quality, "lq");
+});
+
 test("maps QQ and Kugou IDs and native quality values", async () => {
   const { handlers, requests } = loadPlugin({
     response: (url) => ({ status: 200, body: { url: `https://cdn.example.test/${url.pathname}.mp3` } }),

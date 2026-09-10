@@ -60,6 +60,16 @@ const SOURCE_CONFIG = {
 
 const QUALITY_NAMES = ["lq", "sq", "hq", "lossless", "hi-res"];
 
+// Keep SPlayer's logical ladder; hq and sq share ChKSz's exhigh parameter and are
+// de-duplicated before requesting the API below.
+const NETEASE_QUALITY_FALLBACKS = {
+  "hi-res": ["hi-res", "lossless", "hq", "sq", "lq"],
+  lossless: ["lossless", "hq", "sq", "lq"],
+  hq: ["hq", "sq", "lq"],
+  sq: ["sq", "lq"],
+  lq: ["lq"],
+};
+
 const isRecord = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
 
 const pluginError = (code, message) => {
@@ -150,6 +160,12 @@ const throwHttpError = (response) => {
   throw pluginError(code, parts.join("："));
 };
 
+const isUnavailableQualityError = (error) =>
+  error?.code === "CHKSZ_HTTP_404" &&
+  /music url not found\s*,\s*song may be unavailable at this quality level/i.test(
+    error.message || "",
+  );
+
 const requestJson = async (endpoint, params) => {
   const response = await splayer.request(buildApiUrl(endpoint, params), {
     method: "GET",
@@ -226,8 +242,30 @@ const extractExpiry = (body) => {
 
 const resolveUrl = async ({ source, quality, musicInfo }) => {
   const id = getMusicId(musicInfo);
-  const { config, requestedQuality, params } = buildTrackParams(source, id, quality);
-  const body = await requestJson(config.endpoint, params);
+  const { config, requestedQuality } = buildTrackParams(source, id, quality);
+  const qualityCandidates =
+    source === "wy" ? NETEASE_QUALITY_FALLBACKS[requestedQuality] : [requestedQuality];
+  let body;
+  let resolvedQuality = requestedQuality;
+  const attemptedNativeQualities = new Set();
+
+  for (let index = 0; index < qualityCandidates.length; index += 1) {
+    const candidateQuality = qualityCandidates[index];
+    const nativeQuality = config.qualityValues[candidateQuality];
+    if (attemptedNativeQualities.has(nativeQuality)) continue;
+    attemptedNativeQualities.add(nativeQuality);
+    const { params } = buildTrackParams(source, id, candidateQuality);
+
+    try {
+      body = await requestJson(config.endpoint, params);
+      resolvedQuality = candidateQuality;
+      break;
+    } catch (error) {
+      const hasFallback = index < qualityCandidates.length - 1;
+      if (!hasFallback || !isUnavailableQualityError(error)) throw error;
+    }
+  }
+
   const url = extractUrl(body);
 
   if (!url) {
@@ -238,7 +276,7 @@ const resolveUrl = async ({ source, quality, musicInfo }) => {
     );
   }
 
-  const result = { url, quality: requestedQuality };
+  const result = { url, quality: resolvedQuality };
   const expire = extractExpiry(body);
   if (expire) result.expire = expire;
   return result;
