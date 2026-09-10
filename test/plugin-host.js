@@ -4,7 +4,10 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-export const pluginSource = await readFile(resolve(projectRoot, "src", "plugin.js"), "utf8");
+export const pluginSource = await readFile(
+  resolve(projectRoot, "src", "plugin.js"),
+  "utf8",
+);
 
 export const loadPlugin = ({
   apiKey = "chksz_test_key",
@@ -28,7 +31,9 @@ export const loadPlugin = ({
     },
     async request(url, options) {
       requests.push({ url, options });
-      return typeof response === "function" ? response(new URL(url), options) : response;
+      return typeof response === "function"
+        ? response(new URL(url), options)
+        : response;
     },
     log: {
       debug() {},

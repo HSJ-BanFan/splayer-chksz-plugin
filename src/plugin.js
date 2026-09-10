@@ -89,7 +89,8 @@ const SOURCE_POLICIES = {
   },
 };
 
-const isRecord = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
+const isRecord = (value) =>
+  value !== null && typeof value === "object" && !Array.isArray(value);
 
 const pluginError = (code, message) => {
   const error = new Error(message);
@@ -105,7 +106,8 @@ const getMusicId = (musicInfo) => {
   for (const key of ["songmid", "id", "songId"]) {
     const value = musicInfo[key];
     if (typeof value === "string" && value.trim()) return value.trim();
-    if (typeof value === "number" && Number.isFinite(value)) return String(value);
+    if (typeof value === "number" && Number.isFinite(value))
+      return String(value);
   }
 
   throw pluginError("CHKSZ_TRACK_INVALID", "歌曲缺少平台 ID，无法请求 ChKSz。");
@@ -114,7 +116,10 @@ const getMusicId = (musicInfo) => {
 const getSourcePolicy = (source) => {
   const policy = SOURCE_POLICIES[source];
   if (!policy) {
-    throw pluginError("CHKSZ_SOURCE_UNSUPPORTED", `不支持的 SPlayer 音源：${String(source)}。`);
+    throw pluginError(
+      "CHKSZ_SOURCE_UNSUPPORTED",
+      `不支持的 SPlayer 音源：${String(source)}。`,
+    );
   }
   return policy;
 };
@@ -127,7 +132,8 @@ const buildTrackParams = (source, id, quality) => {
     requestedQuality,
     params: {
       [policy.identity.idParameter]: id,
-      [policy.playback.qualityParameter]: policy.playback.qualityValues[requestedQuality],
+      [policy.playback.qualityParameter]:
+        policy.playback.qualityValues[requestedQuality],
       type: "json",
     },
   };
@@ -158,7 +164,10 @@ const createResolutionCore = () => {
 
   const buildApiUrl = (endpoint, params) => {
     const url = new URL(`${API_BASE_URL}${endpoint}`);
-    for (const [key, value] of Object.entries({ ...params, apikey: getApiKey() })) {
+    for (const [key, value] of Object.entries({
+      ...params,
+      apikey: getApiKey(),
+    })) {
       if (value !== undefined && value !== null && value !== "") {
         url.searchParams.set(key, String(value));
       }
@@ -171,7 +180,11 @@ const createResolutionCore = () => {
     for (const key of ["msg", "message", "error"]) {
       const value = body[key];
       if (typeof value === "string" && value.trim()) return value.trim();
-      if (isRecord(value) && typeof value.message === "string" && value.message.trim()) {
+      if (
+        isRecord(value) &&
+        typeof value.message === "string" &&
+        value.message.trim()
+      ) {
         return value.message.trim();
       }
     }
@@ -182,7 +195,8 @@ const createResolutionCore = () => {
     if (!isRecord(headers)) return "";
     const wanted = name.toLowerCase();
     for (const [key, value] of Object.entries(headers)) {
-      if (key.toLowerCase() === wanted && typeof value === "string") return value;
+      if (key.toLowerCase() === wanted && typeof value === "string")
+        return value;
     }
     return "";
   };
@@ -215,12 +229,19 @@ const createResolutionCore = () => {
       timeout: REQUEST_TIMEOUT,
     });
 
-    if (!response || Number(response.status) < 200 || Number(response.status) >= 300) {
+    if (
+      !response ||
+      Number(response.status) < 200 ||
+      Number(response.status) >= 300
+    ) {
       throwHttpError(response);
     }
 
     if (!isRecord(response.body)) {
-      throw pluginError("CHKSZ_INVALID_RESPONSE", "ChKSz 返回的不是有效 JSON 对象。");
+      throw pluginError(
+        "CHKSZ_INVALID_RESPONSE",
+        "ChKSz 返回的不是有效 JSON 对象。",
+      );
     }
 
     return response.body;
@@ -235,7 +256,9 @@ const createResolutionCore = () => {
       typeof body?.result === "string" ? body.result : undefined,
     ];
 
-    const url = candidates.find((value) => typeof value === "string" && value.trim());
+    const url = candidates.find(
+      (value) => typeof value === "string" && value.trim(),
+    );
     if (!url) return "";
 
     const trimmed = url.trim();
@@ -277,8 +300,9 @@ const createResolutionCore = () => {
   };
 
   const selectQualityCandidates = (policy, requestedQuality) => {
-    const logicalQualities =
-      policy.playback.qualityFallbacks?.[requestedQuality] ?? [requestedQuality];
+    const logicalQualities = policy.playback.qualityFallbacks?.[
+      requestedQuality
+    ] ?? [requestedQuality];
     const attemptedNativeQualities = new Set();
     const { qualityValues } = policy.playback;
 
@@ -386,7 +410,13 @@ const getCover = async ({ source, musicInfo }) => {
   const id = getMusicId(musicInfo);
   const body = await requestAction(source, "musicPic", id);
 
-  const cover = extractTextField(body, ["cover", "coverUrl", "pic", "picUrl", "albumCover"]);
+  const cover = extractTextField(body, [
+    "cover",
+    "coverUrl",
+    "pic",
+    "picUrl",
+    "albumCover",
+  ]);
   return { url: /^https?:\/\//i.test(cover) ? cover : "" };
 };
 
@@ -423,4 +453,8 @@ runtimeAdapter.register({
     },
   ],
 });
-runtimeAdapter.bind({ musicUrl: resolveUrl, musicLyric: getLyric, musicPic: getCover });
+runtimeAdapter.bind({
+  musicUrl: resolveUrl,
+  musicLyric: getLyric,
+  musicPic: getCover,
+});

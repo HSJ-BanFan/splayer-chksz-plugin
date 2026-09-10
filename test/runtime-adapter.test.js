@@ -22,7 +22,9 @@ test("VM host accepts explicit source text for alternate runtime scripts", () =>
 });
 
 test("runtime adapter delegates supplied metadata and the three public actions", () => {
-  const { createRuntimeAdapter } = loadPlugin({ response: { status: 200, body: {} } });
+  const { createRuntimeAdapter } = loadPlugin({
+    response: { status: 200, body: {} },
+  });
   const registrations = [];
   const bindings = [];
   const adapter = createRuntimeAdapter({
@@ -44,18 +46,36 @@ test("runtime adapter delegates supplied metadata and the three public actions",
   adapter.bind(handlers);
 
   assert.deepEqual(registrations, [metadata]);
-  assert.deepEqual(bindings.map(([action]) => action), ["musicUrl", "musicLyric", "musicPic"]);
-  assert.deepEqual(bindings.map(([, handler]) => handler()), ["url", "lyric", "pic"]);
+  assert.deepEqual(
+    bindings.map(([action]) => action),
+    ["musicUrl", "musicLyric", "musicPic"],
+  );
+  assert.deepEqual(
+    bindings.map(([, handler]) => handler()),
+    ["url", "lyric", "pic"],
+  );
 });
 
 test("registers all three SPlayer platform sources and a local key setting", () => {
   const { registration } = loadPlugin({ response: { status: 200, body: {} } });
 
   assert.deepEqual(Object.keys(registration.sources), ["wy", "tx", "kg"]);
-  assert.deepEqual([...registration.sources.wy.actions], ["musicUrl", "musicLyric", "musicPic"]);
-  assert.deepEqual([...registration.sources.tx.actions], ["musicUrl", "musicLyric", "musicPic"]);
-  assert.deepEqual([...registration.sources.kg.actions], ["musicUrl", "musicLyric", "musicPic"]);
-  assert.deepEqual([...registration.sources.wy.qualities], ["lq", "sq", "hq", "lossless", "hi-res"]);
+  assert.deepEqual(
+    [...registration.sources.wy.actions],
+    ["musicUrl", "musicLyric", "musicPic"],
+  );
+  assert.deepEqual(
+    [...registration.sources.tx.actions],
+    ["musicUrl", "musicLyric", "musicPic"],
+  );
+  assert.deepEqual(
+    [...registration.sources.kg.actions],
+    ["musicUrl", "musicLyric", "musicPic"],
+  );
+  assert.deepEqual(
+    [...registration.sources.wy.qualities],
+    ["lq", "sq", "hq", "lossless", "hi-res"],
+  );
   assert.equal(registration.settings[0].key, "apiKey");
   assert.equal(registration.settings[0].type, "text");
 });
