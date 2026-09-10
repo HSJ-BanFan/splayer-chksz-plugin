@@ -16,58 +16,77 @@ const API_BASE_URL = "https://api.chksz.com";
 const API_KEY_SETTING = "apiKey";
 const REQUEST_TIMEOUT = 20_000;
 
-const SOURCE_CONFIG = {
-  wy: {
-    name: "ChKSz 网易云",
-    endpoint: "/api/163_music",
-    idParameter: "id",
-    qualityParameter: "level",
-    qualityValues: {
-      "hi-res": "hires",
-      lossless: "lossless",
-      hq: "exhigh",
-      sq: "exhigh",
-      lq: "standard",
-    },
-  },
-  tx: {
-    name: "ChKSz QQ 音乐",
-    endpoint: "/api/qq_music",
-    idParameter: "mid",
-    qualityParameter: "size",
-    qualityValues: {
-      "hi-res": "hires",
-      lossless: "flac",
-      hq: "320k",
-      sq: "320k",
-      lq: "128k",
-    },
-  },
-  kg: {
-    name: "ChKSz 酷狗",
-    endpoint: "/api/kugou_music",
-    idParameter: "id",
-    qualityParameter: "size",
-    qualityValues: {
-      "hi-res": "hires",
-      lossless: "flac",
-      hq: "320k",
-      sq: "320k",
-      lq: "128k",
-    },
-  },
-};
-
 const QUALITY_NAMES = ["lq", "sq", "hq", "lossless", "hi-res"];
-
-// Keep SPlayer's logical ladder; hq and sq share ChKSz's exhigh parameter and are
-// de-duplicated before requesting the API below.
 const NETEASE_QUALITY_FALLBACKS = {
   "hi-res": ["hi-res", "lossless", "hq", "sq", "lq"],
   lossless: ["lossless", "hq", "sq", "lq"],
   hq: ["hq", "sq", "lq"],
   sq: ["sq", "lq"],
   lq: ["lq"],
+};
+
+const SOURCE_POLICIES = {
+  wy: {
+    name: "ChKSz 网易云",
+    identity: { idParameter: "id" },
+    playback: {
+      endpoint: "/api/163_music",
+      qualityParameter: "level",
+      qualityValues: {
+        "hi-res": "hires",
+        lossless: "lossless",
+        hq: "exhigh",
+        sq: "exhigh",
+        lq: "standard",
+      },
+      qualityFallbacks: NETEASE_QUALITY_FALLBACKS,
+    },
+    actions: {
+      musicLyric: { endpoint: "/api/163_lyric", params: {} },
+      musicPic: {
+        endpoint: "/api/163_music",
+        params: { level: "standard", type: "json" },
+      },
+    },
+  },
+  tx: {
+    name: "ChKSz QQ 音乐",
+    identity: { idParameter: "mid" },
+    playback: {
+      endpoint: "/api/qq_music",
+      qualityParameter: "size",
+      qualityValues: {
+        "hi-res": "hires",
+        lossless: "flac",
+        hq: "320k",
+        sq: "320k",
+        lq: "128k",
+      },
+    },
+    actions: {
+      musicLyric: { request: "trackDetails" },
+      musicPic: { request: "trackDetails" },
+    },
+  },
+  kg: {
+    name: "ChKSz 酷狗",
+    identity: { idParameter: "id" },
+    playback: {
+      endpoint: "/api/kugou_music",
+      qualityParameter: "size",
+      qualityValues: {
+        "hi-res": "hires",
+        lossless: "flac",
+        hq: "320k",
+        sq: "320k",
+        lq: "128k",
+      },
+    },
+    actions: {
+      musicLyric: { request: "trackDetails" },
+      musicPic: { request: "trackDetails" },
+    },
+  },
 };
 
 const isRecord = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
@@ -92,23 +111,23 @@ const getMusicId = (musicInfo) => {
   throw pluginError("CHKSZ_TRACK_INVALID", "歌曲缺少平台 ID，无法请求 ChKSz。");
 };
 
-const getConfiguredSource = (source) => {
-  const config = SOURCE_CONFIG[source];
-  if (!config) {
+const getSourcePolicy = (source) => {
+  const policy = SOURCE_POLICIES[source];
+  if (!policy) {
     throw pluginError("CHKSZ_SOURCE_UNSUPPORTED", `不支持的 SPlayer 音源：${String(source)}。`);
   }
-  return config;
+  return policy;
 };
 
 const buildTrackParams = (source, id, quality) => {
-  const config = getConfiguredSource(source);
+  const policy = getSourcePolicy(source);
   const requestedQuality = QUALITY_NAMES.includes(quality) ? quality : "hq";
   return {
-    config,
+    policy,
     requestedQuality,
     params: {
-      [config.idParameter]: id,
-      [config.qualityParameter]: config.qualityValues[requestedQuality],
+      [policy.identity.idParameter]: id,
+      [policy.playback.qualityParameter]: policy.playback.qualityValues[requestedQuality],
       type: "json",
     },
   };
@@ -257,13 +276,14 @@ const createResolutionCore = () => {
     return result;
   };
 
-  const selectQualityCandidates = (source, config, requestedQuality) => {
+  const selectQualityCandidates = (policy, requestedQuality) => {
     const logicalQualities =
-      source === "wy" ? NETEASE_QUALITY_FALLBACKS[requestedQuality] : [requestedQuality];
+      policy.playback.qualityFallbacks?.[requestedQuality] ?? [requestedQuality];
     const attemptedNativeQualities = new Set();
+    const { qualityValues } = policy.playback;
 
     return logicalQualities.filter((candidateQuality) => {
-      const nativeQuality = config.qualityValues[candidateQuality];
+      const nativeQuality = qualityValues[candidateQuality];
       if (attemptedNativeQualities.has(nativeQuality)) return false;
       attemptedNativeQualities.add(nativeQuality);
       return true;
@@ -271,8 +291,8 @@ const createResolutionCore = () => {
   };
 
   const resolve = async ({ source, quality, id }) => {
-    const { config, requestedQuality } = buildTrackParams(source, id, quality);
-    const qualityCandidates = selectQualityCandidates(source, config, requestedQuality);
+    const { policy, requestedQuality } = buildTrackParams(source, id, quality);
+    const qualityCandidates = selectQualityCandidates(policy, requestedQuality);
     let body;
     let resolvedQuality = requestedQuality;
 
@@ -280,7 +300,7 @@ const createResolutionCore = () => {
       const { params } = buildTrackParams(source, id, candidateQuality);
 
       try {
-        body = await requestJson(config.endpoint, params);
+        body = await requestJson(policy.playback.endpoint, params);
         resolvedQuality = candidateQuality;
         break;
       } catch (error) {
@@ -326,17 +346,33 @@ const extractTextField = (body, names) => {
   return "";
 };
 
-const requestTrackDetails = async (source, id) => {
-  const { config, params } = buildTrackParams(source, id, "lq");
-  return requestJson(config.endpoint, params);
+const buildActionRequest = (source, action, id) => {
+  const policy = getSourcePolicy(source);
+  const actionPolicy = policy.actions[action];
+  const params = {
+    [policy.identity.idParameter]: id,
+    ...actionPolicy.params,
+  };
+
+  if (actionPolicy.request === "trackDetails") {
+    params[policy.playback.qualityParameter] = policy.playback.qualityValues.lq;
+    params.type = "json";
+  }
+
+  return {
+    endpoint: actionPolicy.endpoint ?? policy.playback.endpoint,
+    params,
+  };
+};
+
+const requestAction = async (source, action, id) => {
+  const { endpoint, params } = buildActionRequest(source, action, id);
+  return requestJson(endpoint, params);
 };
 
 const getLyric = async ({ source, musicInfo }) => {
   const id = getMusicId(musicInfo);
-  const body =
-    source === "wy"
-      ? await requestJson("/api/163_lyric", { id })
-      : await requestTrackDetails(source, id);
+  const body = await requestAction(source, "musicLyric", id);
 
   return {
     lyric: extractTextField(body, ["lyric", "lrc"]),
@@ -348,10 +384,7 @@ const getLyric = async ({ source, musicInfo }) => {
 
 const getCover = async ({ source, musicInfo }) => {
   const id = getMusicId(musicInfo);
-  const body =
-    source === "wy"
-      ? await requestJson("/api/163_music", { id, level: "standard", type: "json" })
-      : await requestTrackDetails(source, id);
+  const body = await requestAction(source, "musicPic", id);
 
   const cover = extractTextField(body, ["cover", "coverUrl", "pic", "picUrl", "albumCover"]);
   return { url: /^https?:\/\//i.test(cover) ? cover : "" };
@@ -359,10 +392,10 @@ const getCover = async ({ source, musicInfo }) => {
 
 splayer.register({
   sources: Object.fromEntries(
-    Object.entries(SOURCE_CONFIG).map(([source, config]) => [
+    Object.entries(SOURCE_POLICIES).map(([source, policy]) => [
       source,
       {
-        name: config.name,
+        name: policy.name,
         actions: ["musicUrl", "musicLyric", "musicPic"],
         qualities: QUALITY_NAMES,
       },

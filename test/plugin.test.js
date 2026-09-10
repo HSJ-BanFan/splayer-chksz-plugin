@@ -45,11 +45,17 @@ const loadPlugin = ({ apiKey = "chksz_test_key", response }) => {
     clearTimeout,
   };
   vm.runInNewContext(
-    `${pluginSource}\n;globalThis.__resolutionCore = typeof resolutionCore === "undefined" ? undefined : resolutionCore;`,
+    `${pluginSource}\n;globalThis.__resolutionCore = typeof resolutionCore === "undefined" ? undefined : resolutionCore;\n;globalThis.__sourcePolicies = typeof SOURCE_POLICIES === "undefined" ? undefined : SOURCE_POLICIES;`,
     context,
   );
 
-  return { registration, handlers, requests, resolutionCore: context.__resolutionCore };
+  return {
+    registration,
+    handlers,
+    requests,
+    resolutionCore: context.__resolutionCore,
+    sourcePolicies: context.__sourcePolicies,
+  };
 };
 
 test("resolution core exposes a narrow playback resolver and normalizes nested URL expiry", async () => {
@@ -65,6 +71,29 @@ test("resolution core exposes a narrow playback resolver and normalizes nested U
   assert.equal(result.url, "https://cdn.example.test/song.mp3");
   assert.equal(result.quality, "hq");
   assert.equal(result.expire, 1_800_000_000_000);
+});
+
+test("source policies own provider identity and action request strategies", () => {
+  const { sourcePolicies } = loadPlugin({ response: { status: 200, body: {} } });
+
+  assert.deepEqual(Object.keys(sourcePolicies), ["wy", "tx", "kg"]);
+  assert.equal(sourcePolicies.wy.identity.idParameter, "id");
+  assert.equal(sourcePolicies.tx.identity.idParameter, "mid");
+  assert.equal(sourcePolicies.kg.identity.idParameter, "id");
+  assert.equal(sourcePolicies.wy.playback.endpoint, "/api/163_music");
+  assert.equal(sourcePolicies.wy.playback.qualityValues.lossless, "lossless");
+  assert.equal(sourcePolicies.tx.playback.endpoint, "/api/qq_music");
+  assert.equal(sourcePolicies.tx.playback.qualityValues.hq, "320k");
+  assert.equal(sourcePolicies.kg.playback.endpoint, "/api/kugou_music");
+  assert.equal(sourcePolicies.kg.playback.qualityValues["hi-res"], "hires");
+  assert.equal(sourcePolicies.wy.actions.musicLyric.endpoint, "/api/163_lyric");
+  assert.equal(sourcePolicies.wy.actions.musicPic.endpoint, "/api/163_music");
+  assert.equal(sourcePolicies.wy.actions.musicPic.params.level, "standard");
+  assert.equal(sourcePolicies.wy.actions.musicPic.params.type, "json");
+  assert.equal(sourcePolicies.tx.actions.musicLyric.request, "trackDetails");
+  assert.equal(sourcePolicies.tx.actions.musicPic.request, "trackDetails");
+  assert.equal(sourcePolicies.kg.actions.musicLyric.request, "trackDetails");
+  assert.equal(sourcePolicies.kg.actions.musicPic.request, "trackDetails");
 });
 
 test("registers all three SPlayer platform sources and a local key setting", () => {
@@ -220,7 +249,7 @@ test("maps QQ and Kugou IDs and native quality values", async () => {
 });
 
 test("parses NetEase lyrics and translation", async () => {
-  const { handlers } = loadPlugin({
+  const { handlers, requests } = loadPlugin({
     response: {
       status: 200,
       body: {
@@ -239,6 +268,65 @@ test("parses NetEase lyrics and translation", async () => {
   assert.equal(result.lyric, "[00:01.00]主歌词");
   assert.equal(result.tlyric, "[00:01.00]译文");
   assert.equal(result.awlyric, "[0,100](主歌词)");
+  const requestUrl = new URL(requests[0].url);
+  assert.equal(requestUrl.pathname, "/api/163_lyric");
+  assert.equal(requestUrl.searchParams.get("id"), "123");
+  assert.equal(requestUrl.searchParams.get("type"), null);
+  assert.equal(requestUrl.searchParams.get("apikey"), "chksz_test_key");
+});
+
+test("uses shared track-detail requests for QQ and Kugou lyrics", async () => {
+  const { handlers, requests } = loadPlugin({
+    response: { status: 200, body: { lyric: "[00:01.00]歌词" } },
+  });
+
+  await handlers.musicLyric({ source: "tx", musicInfo: { songmid: "qq-mid-1" } });
+  await handlers.musicLyric({ source: "kg", musicInfo: { id: "kg-id-1" } });
+
+  const qqUrl = new URL(requests[0].url);
+  assert.equal(qqUrl.pathname, "/api/qq_music");
+  assert.equal(qqUrl.searchParams.get("mid"), "qq-mid-1");
+  assert.equal(qqUrl.searchParams.get("size"), "128k");
+  assert.equal(qqUrl.searchParams.get("type"), "json");
+  assert.equal(qqUrl.searchParams.get("apikey"), "chksz_test_key");
+
+  const kugouUrl = new URL(requests[1].url);
+  assert.equal(kugouUrl.pathname, "/api/kugou_music");
+  assert.equal(kugouUrl.searchParams.get("id"), "kg-id-1");
+  assert.equal(kugouUrl.searchParams.get("size"), "128k");
+  assert.equal(kugouUrl.searchParams.get("type"), "json");
+  assert.equal(kugouUrl.searchParams.get("apikey"), "chksz_test_key");
+});
+
+test("uses policy-defined cover requests for all providers", async () => {
+  const { handlers, requests } = loadPlugin({
+    response: { status: 200, body: { cover: "https://cdn.example.test/cover.jpg" } },
+  });
+
+  await handlers.musicPic({ source: "wy", musicInfo: { id: "wy-id-1" } });
+  await handlers.musicPic({ source: "tx", musicInfo: { songmid: "qq-mid-1" } });
+  await handlers.musicPic({ source: "kg", musicInfo: { id: "kg-id-1" } });
+
+  const neteaseUrl = new URL(requests[0].url);
+  assert.equal(neteaseUrl.pathname, "/api/163_music");
+  assert.equal(neteaseUrl.searchParams.get("id"), "wy-id-1");
+  assert.equal(neteaseUrl.searchParams.get("level"), "standard");
+  assert.equal(neteaseUrl.searchParams.get("type"), "json");
+  assert.equal(neteaseUrl.searchParams.get("apikey"), "chksz_test_key");
+
+  const qqUrl = new URL(requests[1].url);
+  assert.equal(qqUrl.pathname, "/api/qq_music");
+  assert.equal(qqUrl.searchParams.get("mid"), "qq-mid-1");
+  assert.equal(qqUrl.searchParams.get("size"), "128k");
+  assert.equal(qqUrl.searchParams.get("type"), "json");
+  assert.equal(qqUrl.searchParams.get("apikey"), "chksz_test_key");
+
+  const kugouUrl = new URL(requests[2].url);
+  assert.equal(kugouUrl.pathname, "/api/kugou_music");
+  assert.equal(kugouUrl.searchParams.get("id"), "kg-id-1");
+  assert.equal(kugouUrl.searchParams.get("size"), "128k");
+  assert.equal(kugouUrl.searchParams.get("type"), "json");
+  assert.equal(kugouUrl.searchParams.get("apikey"), "chksz_test_key");
 });
 
 test("surfaces HTTP errors and Retry-After without retrying", async () => {
