@@ -26,11 +26,13 @@ test("source policies own provider identity and action request strategies", () =
   assert.equal(sourcePolicies.tx.identity.idParameter, "mid");
   assert.equal(sourcePolicies.kg.identity.idParameter, "id");
   assert.equal(sourcePolicies.wy.playback.endpoint, "/api/163_music");
+  assert.equal(sourcePolicies.wy.playback.qualityValues["hi-res"], "jymaster");
   assert.equal(sourcePolicies.wy.playback.qualityValues.lossless, "lossless");
   assert.equal(sourcePolicies.tx.playback.endpoint, "/api/qq_music");
+  assert.equal(sourcePolicies.tx.playback.qualityValues["hi-res"], "master");
   assert.equal(sourcePolicies.tx.playback.qualityValues.hq, "320k");
   assert.equal(sourcePolicies.kg.playback.endpoint, "/api/kugou_music");
-  assert.equal(sourcePolicies.kg.playback.qualityValues["hi-res"], "hires");
+  assert.equal(sourcePolicies.kg.playback.qualityValues["hi-res"], "master");
   assert.equal(sourcePolicies.wy.actions.musicLyric.endpoint, "/api/163_lyric");
   assert.equal(sourcePolicies.wy.actions.musicPic.endpoint, "/api/163_music");
   assert.equal(sourcePolicies.wy.actions.musicPic.params.level, "standard");
@@ -127,7 +129,7 @@ test("falls through the supported NetEase quality ladder and reports the effecti
       const level = url.searchParams.get("level");
       requestedLevels.push(level);
 
-      if (["hires", "lossless", "exhigh"].includes(level)) {
+      if (["jymaster", "lossless", "exhigh"].includes(level)) {
         return {
           status: 404,
           body: { msg: "Music URL not found, song may be unavailable at this quality level" },
@@ -144,7 +146,7 @@ test("falls through the supported NetEase quality ladder and reports the effecti
     musicInfo: { id: "123" },
   });
 
-  assert.deepEqual(requestedLevels, ["hires", "lossless", "exhigh", "standard"]);
+  assert.deepEqual(requestedLevels, ["jymaster", "lossless", "exhigh", "standard"]);
   assert.equal(result.quality, "lq");
 });
 
@@ -172,7 +174,41 @@ test("maps QQ and Kugou IDs and native quality values", async () => {
   const kugouUrl = new URL(requests[1].url);
   assert.equal(kugouUrl.pathname, "/api/kugou_music");
   assert.equal(kugouUrl.searchParams.get("id"), "kg-id-1");
-  assert.equal(kugouUrl.searchParams.get("size"), "hires");
+  assert.equal(kugouUrl.searchParams.get("size"), "master");
+});
+
+test("maps SPlayer hi-res to each provider's top ChKSz quality", async () => {
+  const { handlers, requests } = loadPlugin({
+    response: { status: 200, body: { url: "https://cdn.example.test/song.flac" } },
+  });
+
+  await handlers.musicUrl({
+    source: "wy",
+    quality: "hi-res",
+    musicInfo: { id: "wy-id-1" },
+  });
+  await handlers.musicUrl({
+    source: "tx",
+    quality: "hi-res",
+    musicInfo: { songmid: "qq-mid-1" },
+  });
+  await handlers.musicUrl({
+    source: "kg",
+    quality: "hi-res",
+    musicInfo: { id: "kg-id-1" },
+  });
+
+  assert.deepEqual(
+    requests.map((request) => {
+      const url = new URL(request.url);
+      return { path: url.pathname, quality: url.searchParams.get("level") ?? url.searchParams.get("size") };
+    }),
+    [
+      { path: "/api/163_music", quality: "jymaster" },
+      { path: "/api/qq_music", quality: "master" },
+      { path: "/api/kugou_music", quality: "master" },
+    ],
+  );
 });
 
 test("parses NetEase lyrics and translation", async () => {

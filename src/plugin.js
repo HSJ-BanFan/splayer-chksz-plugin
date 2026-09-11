@@ -37,7 +37,7 @@ const SOURCE_POLICIES = {
       endpoint: "/api/163_music",
       qualityParameter: "level",
       qualityValues: {
-        "hi-res": "hires",
+        "hi-res": "jymaster",
         lossless: "lossless",
         hq: "exhigh",
         sq: "exhigh",
@@ -62,7 +62,7 @@ const SOURCE_POLICIES = {
       endpoint: "/api/qq_music",
       qualityParameter: "size",
       qualityValues: {
-        "hi-res": "hires",
+        "hi-res": "master",
         lossless: "flac",
         hq: "320k",
         sq: "320k",
@@ -88,7 +88,7 @@ const SOURCE_POLICIES = {
       endpoint: "/api/kugou_music",
       qualityParameter: "size",
       qualityValues: {
-        "hi-res": "hires",
+        "hi-res": "master",
         lossless: "flac",
         hq: "320k",
         sq: "320k",

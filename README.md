@@ -18,6 +18,17 @@
 
 支持 `lq`、`sq`、`hq`、`lossless`、`hi-res` 五种 SPlayer 音质等级。三个平台若明确返回“该音质不可用”的 404，都会按音质从高到低降级；网易云在所有音质都不可用（通常是无版权歌曲）时，还会按歌名、歌手和时长在 QQ 音乐、酷狗中匹配同一首歌并改用其播放地址。其他错误不会自动重试，也不会在日志中输出 API Key。
 
+音质会按 ChKSz 接口的原生参数映射：
+
+| SPlayer 音质 | 网易云 `level` | QQ / 酷狗 `size` |
+| --- | --- | --- |
+| `hi-res` | `jymaster` | `master` |
+| `lossless` | `lossless` | `flac` |
+| `hq` / `sq` | `exhigh` | `320k` |
+| `lq` | `standard` | `128k` |
+
+对应接口文档：[网易云音乐](https://api.chksz.com/docs/163_music.html)、[QQ 音乐](https://api.chksz.com/docs/qq_music.html)、[酷狗音乐](https://api.chksz.com/docs/kugou_music.html)。
+
 ## 构建
 
 需要 Node.js 20 或更高版本：
