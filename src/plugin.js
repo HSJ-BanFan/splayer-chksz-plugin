@@ -1,7 +1,7 @@
 /**
  * @name        ChKSz 音源
  * @id          chksz.splayer-source
- * @version     0.2.0
+ * @version     0.3.0
  * @description 使用 ChKSz API 解析网易云、QQ 音乐和酷狗播放地址
  * @author      HSJ-BanFan
  * @homepage    https://github.com/HSJ-BanFan/splayer-chksz-plugin
@@ -9,7 +9,7 @@
  * @grant       network
  * @apiLevel    2
  * @updateUrl   https://raw.githubusercontent.com/HSJ-BanFan/splayer-chksz-plugin/main/dist/chksz.splayer-source.js
- * @changelog   网易云无版权歌曲自动改用 QQ 音乐 / 酷狗播放\nQQ 音乐与酷狗同样支持音质降级
+ * @changelog   智能缓存与并发请求复用减少重复调用\n新增省配额模式及歌词封面额外请求开关
  */
 
 const API_BASE_URL = "https://api.chksz.com";
@@ -27,6 +27,10 @@ const RESOLUTION_TIME_BUDGET = 18_000;
 const RESOLUTION_TIMEOUT_ERROR = "CHKSZ_RESOLUTION_TIMEOUT";
 const REQUEST_TIMEOUT_ERROR = "CHKSZ_REQUEST_TIMEOUT";
 const NETWORK_ERROR = "CHKSZ_NETWORK_ERROR";
+const CACHE_LIMIT = 128;
+const CACHE_TTL = 5 * 60_000;
+const UNAVAILABLE_TTL = 60_000;
+const URL_EXPIRY_MARGIN = 30_000;
 
 const QUALITY_NAMES = ["lq", "sq", "hq", "lossless", "hi-res"];
 // Logical downgrade ladder shared by every provider: hi-res → lossless → hq → sq → lq.
@@ -182,6 +186,63 @@ const buildTrackParams = (source, id, quality, nativeQualityOverride) => {
 };
 
 const createResolutionCore = () => {
+  let session;
+  const enabledSetting = (key, fallback) => {
+    const value = splayer.getSetting(key);
+    return value === undefined || value === null || value === "" ? fallback : value === true;
+  };
+
+  // A new account/configuration owns new maps. In-flight old work cannot fill them.
+  const getSession = () => {
+    const apiKey = getApiKey();
+    const config = {
+      smartCache: enabledSetting("smartCache", true),
+      economyMode: enabledSetting("economyMode", false),
+      metadataFallback: enabledSetting("metadataFallback", true),
+      crossPlatformFallback: enabledSetting(CROSS_PLATFORM_SETTING, true),
+    };
+    const signature = JSON.stringify([apiKey, config]);
+    if (session?.signature !== signature) {
+      session = {
+        apiKey, config, signature,
+        responses: new Map(), metadata: new Map(), actions: new Map(),
+        pending: new Map(), actionPending: new Map(),
+      };
+    }
+    return session;
+  };
+
+  const readCache = (map, key) => {
+    const entry = map.get(key);
+    if (!entry) return undefined;
+    if (entry.until <= Date.now()) {
+      map.delete(key);
+      return undefined;
+    }
+    return entry.value;
+  };
+
+  const writeCache = (map, key, value, until) => {
+    if (until <= Date.now()) return;
+    map.delete(key);
+    while (map.size >= CACHE_LIMIT) map.delete(map.keys().next().value);
+    map.set(key, { value, until });
+  };
+
+  const sharePending = async (state, map, key, operation) => {
+    if (!state.config.smartCache) return operation();
+    const existing = map.get(key);
+    if (existing) return existing;
+    if (map.size >= CACHE_LIMIT) return operation();
+    const pending = Promise.resolve().then(operation);
+    map.set(key, pending);
+    try {
+      return await pending;
+    } finally {
+      if (map.get(key) === pending) map.delete(key);
+    }
+  };
+
   const getApiKey = () => {
     const value = splayer.getSetting(API_KEY_SETTING);
     const apiKey = typeof value === "string" ? value.trim() : "";
@@ -204,11 +265,11 @@ const createResolutionCore = () => {
     return apiKey;
   };
 
-  const buildApiUrl = (endpoint, params) => {
+  const buildApiUrl = (endpoint, params, apiKey) => {
     const url = new URL(`${API_BASE_URL}${endpoint}`);
     for (const [key, value] of Object.entries({
       ...params,
-      apikey: getApiKey(),
+      apikey: apiKey,
     })) {
       if (value !== undefined && value !== null && value !== "") {
         url.searchParams.set(key, String(value));
@@ -315,11 +376,6 @@ const createResolutionCore = () => {
       String(error?.code),
     );
 
-  const isCrossPlatformEnabled = () => {
-    const value = splayer.getSetting(CROSS_PLATFORM_SETTING);
-    return value === undefined || value === null || value === "" || value === true;
-  };
-
   const requestWithTimeout = async (
     url,
     options,
@@ -350,7 +406,7 @@ const createResolutionCore = () => {
     }
   };
 
-  const requestJson = async (endpoint, params, { budget, deadline } = {}) => {
+  const performRequestJson = async (endpoint, params, { budget, deadline, state }) => {
     let timeout = REQUEST_TIMEOUT;
     let timeoutCode = REQUEST_TIMEOUT_ERROR;
     const remainingResolutionTime = Number.isFinite(deadline)
@@ -382,7 +438,7 @@ const createResolutionCore = () => {
       timeout = Math.max(1, Math.min(timeout, remainingResolutionTime));
     }
 
-    const requestUrl = buildApiUrl(endpoint, params);
+    const requestUrl = buildApiUrl(endpoint, params, state.apiKey);
     const requestOptions = {
       method: "GET",
       responseType: "json",
@@ -454,6 +510,73 @@ const createResolutionCore = () => {
     return response.body;
   };
 
+  const requestKey = (endpoint, params) => JSON.stringify([
+    endpoint, Object.entries(params).sort(([left], [right]) => left.localeCompare(right)),
+  ]);
+
+  const assertCurrentSession = (state) => {
+    if (state !== getSession()) {
+      throw pluginError("CHKSZ_CONFIG_CHANGED", "ChKSz 配置已变化，请重新播放。");
+    }
+  };
+
+  const hasActionMetadata = (body, action) => {
+    const fields = action === "musicLyric"
+      ? ["lyric", "lrc", "awlyric", "yrc", "qrc", "krc"]
+      : ["cover", "coverUrl", "pic", "picUrl", "albumCover"];
+    const text = extractTextField(body, fields);
+    return Boolean(text) && (action === "musicLyric" || /^https?:\/\//i.test(text));
+  };
+
+  const requestJson = async (endpoint, params, context = {}) => {
+    const state = context.state ?? getSession();
+    assertCurrentSession(state);
+    // Cache hits do not spend a request budget, but must respect the total deadline.
+    if (Number.isFinite(context.deadline) && Date.now() >= context.deadline) {
+      throw pluginError(RESOLUTION_TIMEOUT_ERROR, "SPlayer 播放地址解析已达到时间上限。");
+    }
+    if (context.budget && Date.now() >= context.budget.deadline) {
+      throw pluginError(CROSS_PLATFORM_LIMIT_ERROR, "ChKSz 跨平台兜底已达到请求或时间上限。");
+    }
+    const key = requestKey(endpoint, params);
+    const cached = state.config.smartCache && readCache(state.responses, key);
+    if (cached && (cached.error || !context.action || hasActionMetadata(cached.body, context.action))) {
+      splayer.log.debug(`ChKSz 复用缓存：${endpoint}`);
+      if (cached.error) throw cached.error;
+      return cached.body;
+    }
+    let body;
+    try {
+      body = await performRequestJson(endpoint, params, { ...context, state });
+    } catch (error) {
+      if (state.config.smartCache && isUnavailableQualityError(error)) {
+        writeCache(state.responses, key, { error }, Date.now() + UNAVAILABLE_TTL);
+      }
+      throw error;
+    }
+    assertCurrentSession(state);
+    if (state.config.smartCache) {
+      if (params.msg) {
+        const hasList = [body, body.data, body.result].some((value) => Array.isArray(value?.list));
+        if (hasList) {
+          const ttl = extractCandidates(body).length ? CACHE_TTL : UNAVAILABLE_TTL;
+          writeCache(state.responses, key, { body }, Date.now() + ttl);
+        }
+      } else {
+        const expiry = extractExpiry(body);
+        if (extractUrl(body) && expiry) {
+          writeCache(state.responses, key, { body }, Math.min(expiry - URL_EXPIRY_MARGIN, Date.now() + CACHE_TTL));
+        }
+        for (const [source, policy] of Object.entries(SOURCE_POLICIES)) {
+          if (policy.playback.endpoint === endpoint && params[policy.identity.idParameter] != null) {
+            writeCache(state.metadata, JSON.stringify([source, String(params[policy.identity.idParameter])]), body, Date.now() + CACHE_TTL);
+          }
+        }
+      }
+    }
+    return body;
+  };
+
   const extractUrl = (body) => {
     const candidates = [
       body?.url,
@@ -506,8 +629,8 @@ const createResolutionCore = () => {
     return result;
   };
 
-  const selectQualityCandidates = (policy, requestedQuality) => {
-    const logicalQualities = policy.playback.qualityFallbacks?.[
+  const selectQualityCandidates = (policy, requestedQuality, economyMode) => {
+    const logicalQualities = economyMode ? [requestedQuality, "lq"] : policy.playback.qualityFallbacks?.[
       requestedQuality
     ] ?? [requestedQuality];
     const attemptedNativeQualities = new Set();
@@ -517,7 +640,7 @@ const createResolutionCore = () => {
       .flatMap((candidateQuality) =>
         [
           qualityValues[candidateQuality],
-          ...(policy.playback.qualityAlternatives?.[candidateQuality] ?? []),
+          ...(economyMode ? [] : policy.playback.qualityAlternatives?.[candidateQuality] ?? []),
         ].map((nativeQuality) => ({ candidateQuality, nativeQuality })),
       )
       .filter(({ nativeQuality }) => {
@@ -529,7 +652,7 @@ const createResolutionCore = () => {
 
   const resolveOnPlatform = async (source, quality, id, requestContext = {}) => {
     const { policy, requestedQuality } = buildTrackParams(source, id, quality);
-    const qualityCandidates = selectQualityCandidates(policy, requestedQuality);
+    const qualityCandidates = selectQualityCandidates(policy, requestedQuality, requestContext.state?.config.economyMode);
     let body;
     let resolvedQuality = requestedQuality;
 
@@ -652,16 +775,16 @@ const createResolutionCore = () => {
     }
     return matches
       .sort((left, right) => right.score - left.score)
-      .slice(0, CROSS_PLATFORM_MAX_CANDIDATES)
+      .slice(0, requestContext.state?.config.economyMode ? 1 : CROSS_PLATFORM_MAX_CANDIDATES)
       .map(({ candidate, id }) => ({ candidate, id }));
   };
 
-  const resolveAcrossPlatforms = async (policy, quality, track, deadline) => {
+  const resolveAcrossPlatforms = async (policy, quality, track, deadline, state) => {
     const budget = {
-      remaining: CROSS_PLATFORM_REQUEST_BUDGET,
+      remaining: state.config.economyMode ? 4 : CROSS_PLATFORM_REQUEST_BUDGET,
       deadline: Math.min(deadline, Date.now() + CROSS_PLATFORM_TIME_BUDGET),
     };
-    const requestContext = { budget, deadline };
+    const requestContext = { budget, deadline, state };
     let firstRecoverableError;
 
     const rememberRecoverableError = (error) => {
@@ -752,23 +875,23 @@ const createResolutionCore = () => {
     return null;
   };
 
-  const resolve = async ({ source, quality, id, track }) => {
+  const resolveUncached = async ({ source, quality, id, track }, state) => {
     const { policy } = buildTrackParams(source, id, quality);
     const descriptor = getTrackDescriptor(track);
     const deadline = Date.now() + RESOLUTION_TIME_BUDGET;
 
     try {
-      const resolution = await resolveOnPlatform(source, quality, id, { deadline });
+      const resolution = await resolveOnPlatform(source, quality, id, { deadline, state });
       return resolution.result;
     } catch (error) {
       const canCrossSearch =
         Boolean(policy.crossPlatform) &&
         isUnavailableQualityError(error) &&
         Boolean(descriptor.name) &&
-        isCrossPlatformEnabled();
+        state.config.crossPlatformFallback;
       if (!canCrossSearch) throw error;
 
-      const fallback = await resolveAcrossPlatforms(policy, quality, descriptor, deadline);
+      const fallback = await resolveAcrossPlatforms(policy, quality, descriptor, deadline, state);
       if (fallback) return fallback;
 
       const platformNames = policy.crossPlatform.sources
@@ -781,11 +904,38 @@ const createResolutionCore = () => {
     }
   };
 
-  return { requestJson, resolve };
+  const resolve = async (input) => {
+    const state = getSession();
+    const { requestedQuality } = buildTrackParams(input.source, input.id, input.quality);
+    const key = JSON.stringify([input.source, String(input.id), requestedQuality, getTrackDescriptor(input.track)]);
+    const result = await sharePending(state, state.pending, key, () => resolveUncached(input, state));
+    assertCurrentSession(state);
+    return { ...result };
+  };
+
+  const requestAction = async (source, action, id) => {
+    const state = getSession();
+    const { endpoint, params } = buildActionRequest(source, action, id);
+    const key = requestKey(endpoint, params);
+    if (state.config.smartCache) {
+      const metadata = readCache(state.metadata, JSON.stringify([source, String(id)]));
+      if (hasActionMetadata(metadata, action)) return metadata;
+      const cached = readCache(state.actions, key);
+      if (hasActionMetadata(cached, action)) return cached;
+    }
+    if (!state.config.metadataFallback) return {};
+    return sharePending(state, state.actionPending, key, async () => {
+      const body = await requestJson(endpoint, params, { state, action });
+      if (state.config.smartCache) writeCache(state.actions, key, body, Date.now() + CACHE_TTL);
+      return body;
+    });
+  };
+
+  return { requestAction, resolve };
 };
 
 const resolutionImplementation = createResolutionCore();
-const { requestJson } = resolutionImplementation;
+const { requestAction } = resolutionImplementation;
 const resolutionCore = { resolve: resolutionImplementation.resolve };
 
 const resolveUrl = async ({ source, quality, musicInfo }) => {
@@ -830,11 +980,6 @@ const buildActionRequest = (source, action, id) => {
     endpoint: actionPolicy.endpoint ?? policy.playback.endpoint,
     params,
   };
-};
-
-const requestAction = async (source, action, id) => {
-  const { endpoint, params } = buildActionRequest(source, action, id);
-  return requestJson(endpoint, params);
 };
 
 const getLyric = async ({ source, musicInfo }) => {
@@ -900,6 +1045,27 @@ runtimeAdapter.register({
       label: "网易云无版权时改用 QQ 音乐 / 酷狗",
       description:
         "网易云在所有音质都没有播放地址时，按歌名、歌手和时长在 QQ 音乐、酷狗中匹配同一首歌。每次匹配会额外消耗 ChKSz 额度。",
+      default: true,
+    },
+    {
+      key: "smartCache",
+      type: "switch",
+      label: "智能请求复用",
+      description: "合并相同播放请求；缓存明确有效的地址与搜索结果，短暂跳过不可用音质。仅保存在内存，切换配置会清空。",
+      default: true,
+    },
+    {
+      key: "economyMode",
+      type: "switch",
+      label: "省配额模式（减少音质与候选探测）",
+      description: "只尝试目标音质和标准音质；跨平台每个平台只探测一个候选、最多四次请求。可能错过中间音质或可播版本。",
+      default: false,
+    },
+    {
+      key: "metadataFallback",
+      type: "switch",
+      label: "允许为歌词和封面额外请求",
+      description: "关闭后仅返回已有缓存中的歌词、封面，不为这些动作单独调用 ChKSz。",
       default: true,
     },
   ],

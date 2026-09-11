@@ -13,6 +13,7 @@ export const loadPlugin = ({
   apiKey = "chksz_test_key",
   settings: settingOverrides = {},
   response,
+  now = () => Date.now(),
   sourceText = pluginSource,
 } = {}) => {
   const registration = {};
@@ -52,6 +53,7 @@ export const loadPlugin = ({
     console,
     setTimeout,
     clearTimeout,
+    Date: class extends Date { static now() { return now(); } },
   };
   vm.runInNewContext(
     `${sourceText}
@@ -66,6 +68,7 @@ export const loadPlugin = ({
     handlers,
     requests,
     logs,
+    setSetting(key, value) { settings[key] = value; },
     resolutionCore: context.__resolutionCore,
     sourcePolicies: context.__sourcePolicies,
     createRuntimeAdapter: context.__createRuntimeAdapter,
