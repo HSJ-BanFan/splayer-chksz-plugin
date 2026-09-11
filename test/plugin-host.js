@@ -11,13 +11,15 @@ export const pluginSource = await readFile(
 
 export const loadPlugin = ({
   apiKey = "chksz_test_key",
+  settings: settingOverrides = {},
   response,
   sourceText = pluginSource,
 } = {}) => {
   const registration = {};
   const handlers = {};
   const requests = [];
-  const settings = { apiKey };
+  const logs = [];
+  const settings = { apiKey, ...settingOverrides };
 
   const splayer = {
     register(args) {
@@ -35,12 +37,12 @@ export const loadPlugin = ({
         ? response(new URL(url), options)
         : response;
     },
-    log: {
-      debug() {},
-      info() {},
-      warn() {},
-      error() {},
-    },
+    log: Object.fromEntries(
+      ["debug", "info", "warn", "error"].map((level) => [
+        level,
+        (...args) => logs.push({ level, args }),
+      ]),
+    ),
   };
 
   const context = {
@@ -63,6 +65,7 @@ export const loadPlugin = ({
     registration,
     handlers,
     requests,
+    logs,
     resolutionCore: context.__resolutionCore,
     sourcePolicies: context.__sourcePolicies,
     createRuntimeAdapter: context.__createRuntimeAdapter,

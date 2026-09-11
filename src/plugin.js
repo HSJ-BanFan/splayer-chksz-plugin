@@ -1,7 +1,7 @@
 /**
  * @name        ChKSz 音源
  * @id          chksz.splayer-source
- * @version     0.1.0
+ * @version     0.2.0
  * @description 使用 ChKSz API 解析网易云、QQ 音乐和酷狗播放地址
  * @author      HSJ-BanFan
  * @homepage    https://github.com/HSJ-BanFan/splayer-chksz-plugin
@@ -9,21 +9,25 @@
  * @grant       network
  * @apiLevel    1
  * @updateUrl   https://raw.githubusercontent.com/HSJ-BanFan/splayer-chksz-plugin/main/dist/chksz.splayer-source.js
- * @changelog   首次公开发布
+ * @changelog   网易云无版权歌曲自动改用 QQ 音乐 / 酷狗播放\nQQ 音乐与酷狗同样支持音质降级
  */
 
 const API_BASE_URL = "https://api.chksz.com";
 const API_KEY_SETTING = "apiKey";
 const REQUEST_TIMEOUT = 20_000;
 
+const CROSS_PLATFORM_SETTING = "crossPlatformFallback";
+const DURATION_TOLERANCE_SECONDS = 20;
+const SEARCH_RESULT_LIMIT = 10;
+
 const QUALITY_NAMES = ["lq", "sq", "hq", "lossless", "hi-res"];
-const NETEASE_QUALITY_FALLBACKS = {
-  "hi-res": ["hi-res", "lossless", "hq", "sq", "lq"],
-  lossless: ["lossless", "hq", "sq", "lq"],
-  hq: ["hq", "sq", "lq"],
-  sq: ["sq", "lq"],
-  lq: ["lq"],
-};
+// Logical downgrade ladder shared by every provider: hi-res → lossless → hq → sq → lq.
+const QUALITY_FALLBACKS = Object.fromEntries(
+  QUALITY_NAMES.map((quality, index) => [
+    quality,
+    QUALITY_NAMES.slice(0, index + 1).reverse(),
+  ]),
+);
 
 const SOURCE_POLICIES = {
   wy: {
@@ -39,8 +43,10 @@ const SOURCE_POLICIES = {
         sq: "exhigh",
         lq: "standard",
       },
-      qualityFallbacks: NETEASE_QUALITY_FALLBACKS,
+      qualityFallbacks: QUALITY_FALLBACKS,
     },
+    // NetEase lacks the rights to many catalogues; look the same song up elsewhere.
+    crossPlatform: { sources: ["tx", "kg"] },
     actions: {
       musicLyric: { endpoint: "/api/163_lyric", params: {} },
       musicPic: {
@@ -62,6 +68,13 @@ const SOURCE_POLICIES = {
         sq: "320k",
         lq: "128k",
       },
+      qualityFallbacks: QUALITY_FALLBACKS,
+    },
+    search: {
+      endpoint: "/api/qq_music",
+      keywordParameter: "msg",
+      params: { num: SEARCH_RESULT_LIMIT },
+      candidateIdField: "mid",
     },
     actions: {
       musicLyric: { request: "trackDetails" },
@@ -81,6 +94,13 @@ const SOURCE_POLICIES = {
         sq: "320k",
         lq: "128k",
       },
+      qualityFallbacks: QUALITY_FALLBACKS,
+    },
+    search: {
+      endpoint: "/api/kugou_music",
+      keywordParameter: "msg",
+      params: {},
+      candidateIdField: "id",
     },
     actions: {
       musicLyric: { request: "trackDetails" },
@@ -112,6 +132,17 @@ const getMusicId = (musicInfo) => {
 
   throw pluginError("CHKSZ_TRACK_INVALID", "歌曲缺少平台 ID，无法请求 ChKSz。");
 };
+
+const textOrEmpty = (value) => (typeof value === "string" ? value.trim() : "");
+
+const ARTIST_SEPARATOR = /[/、,，&]/;
+
+/** Metadata SPlayer attaches to musicInfo; only used for cross-platform matching. */
+const getTrackDescriptor = (musicInfo) => ({
+  name: textOrEmpty(musicInfo?.name),
+  singer: textOrEmpty(musicInfo?.singer),
+  interval: textOrEmpty(musicInfo?.interval),
+});
 
 const getSourcePolicy = (source) => {
   const policy = SOURCE_POLICIES[source];
@@ -222,6 +253,15 @@ const createResolutionCore = () => {
       error.message || "",
     );
 
+  // Key, quota, ban and rate-limit failures affect every request; stop probing after them.
+  const isAccountError = (error) =>
+    /^CHKSZ_(CONFIG_|HTTP_(401|402|403|429)$)/.test(String(error?.code));
+
+  const isCrossPlatformEnabled = () => {
+    const value = splayer.getSetting(CROSS_PLATFORM_SETTING);
+    return value === undefined || value === null || value === "" || value === true;
+  };
+
   const requestJson = async (endpoint, params) => {
     const response = await splayer.request(buildApiUrl(endpoint, params), {
       method: "GET",
@@ -314,7 +354,7 @@ const createResolutionCore = () => {
     });
   };
 
-  const resolve = async ({ source, quality, id }) => {
+  const resolveOnPlatform = async (source, quality, id) => {
     const { policy, requestedQuality } = buildTrackParams(source, id, quality);
     const qualityCandidates = selectQualityCandidates(policy, requestedQuality);
     let body;
@@ -338,6 +378,138 @@ const createResolutionCore = () => {
     return result;
   };
 
+  const normaliseText = (value) =>
+    String(value ?? "")
+      .toLowerCase()
+      .replace(/[\s\p{P}\p{S}]+/gu, "");
+
+  const splitArtists = (value) =>
+    String(value ?? "").split(ARTIST_SEPARATOR).map(normaliseText).filter(Boolean);
+
+  const looselyEqual = (a, b) =>
+    Boolean(a) && Boolean(b) && (a === b || a.includes(b) || b.includes(a));
+
+  const parseDurationSeconds = (value) => {
+    if (typeof value === "number") {
+      if (!Number.isFinite(value) || value <= 0) return 0;
+      // Values this large can only be milliseconds.
+      return value >= 36_000 ? value / 1000 : value;
+    }
+    const text = textOrEmpty(value);
+    const clock = /^(\d{1,3}):(\d{2})$/.exec(text);
+    if (clock) return Number(clock[1]) * 60 + Number(clock[2]);
+    return parseDurationSeconds(Number(text));
+  };
+
+  /** 0 = different song, 1 = title contains/contained, 2 = exact title. */
+  const matchScore = (track, candidate) => {
+    if (!isRecord(candidate)) return 0;
+    const wantedName = normaliseText(track.name);
+    const candidateName = normaliseText(candidate.name);
+    if (!looselyEqual(wantedName, candidateName)) return 0;
+
+    const wantedArtists = splitArtists(track.singer);
+    const candidateArtists = splitArtists(candidate.singer);
+    if (
+      wantedArtists.length &&
+      candidateArtists.length &&
+      !wantedArtists.some((artist) =>
+        candidateArtists.some((other) => looselyEqual(artist, other)),
+      )
+    ) {
+      return 0;
+    }
+
+    const wantedSeconds = parseDurationSeconds(track.interval);
+    const candidateSeconds = parseDurationSeconds(
+      candidate.duration ?? candidate.interval,
+    );
+    if (
+      wantedSeconds &&
+      candidateSeconds &&
+      Math.abs(wantedSeconds - candidateSeconds) > DURATION_TOLERANCE_SECONDS
+    ) {
+      return 0;
+    }
+
+    return wantedName === candidateName ? 2 : 1;
+  };
+
+  const extractCandidates = (body) => {
+    for (const container of [body, body?.data, body?.result]) {
+      if (Array.isArray(container?.list)) return container.list;
+    }
+    return [];
+  };
+
+  const findMatchingTrack = async (source, track) => {
+    const { search } = getSourcePolicy(source);
+    const primaryArtist = track.singer.split(ARTIST_SEPARATOR)[0].trim();
+    const keyword = [track.name, primaryArtist].filter(Boolean).join(" ");
+    const body = await requestJson(search.endpoint, {
+      ...search.params,
+      [search.keywordParameter]: keyword,
+    });
+
+    let best = { score: 0, id: null };
+    for (const candidate of extractCandidates(body)) {
+      const score = matchScore(track, candidate);
+      if (score <= best.score) continue;
+      const rawId = candidate[search.candidateIdField];
+      const id = typeof rawId === "number" ? String(rawId) : textOrEmpty(rawId);
+      if (id) best = { score, id };
+    }
+    return best.id;
+  };
+
+  const resolveAcrossPlatforms = async (policy, quality, track) => {
+    for (const targetSource of policy.crossPlatform.sources) {
+      const targetPolicy = getSourcePolicy(targetSource);
+      try {
+        const id = await findMatchingTrack(targetSource, track);
+        if (!id) continue;
+        const result = await resolveOnPlatform(targetSource, quality, id);
+        splayer.log.info(
+          `《${track.name}》在${policy.name}不可用，已改用 ${targetPolicy.name} 播放（${id}）。`,
+        );
+        return result;
+      } catch (error) {
+        if (isAccountError(error)) throw error;
+        splayer.log.warn(
+          `${targetPolicy.name} 匹配《${track.name}》失败：${error?.message ?? error}`,
+        );
+      }
+    }
+    return null;
+  };
+
+  const resolve = async ({ source, quality, id, track }) => {
+    const { policy } = buildTrackParams(source, id, quality);
+    const descriptor = getTrackDescriptor(track);
+
+    try {
+      return await resolveOnPlatform(source, quality, id);
+    } catch (error) {
+      const canCrossSearch =
+        Boolean(policy.crossPlatform) &&
+        isUnavailableQualityError(error) &&
+        Boolean(descriptor.name) &&
+        isCrossPlatformEnabled();
+      if (!canCrossSearch) throw error;
+
+      const fallback = await resolveAcrossPlatforms(policy, quality, descriptor);
+      if (fallback) return fallback;
+
+      const platformNames = policy.crossPlatform.sources
+        .map((target) => getSourcePolicy(target).name)
+        .join("、");
+      throw pluginError(
+        "CHKSZ_TRACK_UNAVAILABLE",
+        `${policy.name}无法提供《${descriptor.name}》的播放地址（${error.message}），且在 ${platformNames} 中未匹配到同一首歌。`,
+      );
+    }
+  };
+
   return { requestJson, resolve };
 };
 
@@ -347,7 +519,7 @@ const resolutionCore = { resolve: resolutionImplementation.resolve };
 
 const resolveUrl = async ({ source, quality, musicInfo }) => {
   const id = getMusicId(musicInfo);
-  return resolutionCore.resolve({ source, quality, id });
+  return resolutionCore.resolve({ source, quality, id, track: musicInfo });
 };
 
 const textFromValue = (value) => {
@@ -450,6 +622,14 @@ runtimeAdapter.register({
       description: "仅保存在 SPlayer 本机设置中；不要分享配置文件。",
       default: "",
       placeholder: "chksz_...",
+    },
+    {
+      key: CROSS_PLATFORM_SETTING,
+      type: "switch",
+      label: "网易云无版权时改用 QQ 音乐 / 酷狗",
+      description:
+        "网易云在所有音质都没有播放地址时，按歌名、歌手和时长在 QQ 音乐、酷狗中匹配同一首歌。每次匹配会额外消耗 ChKSz 额度。",
+      default: true,
     },
   ],
 });
