@@ -153,6 +153,21 @@ test("surfaces a ChKSz business account error from a successful HTTP response", 
   assert.equal(requests.length, 1);
 });
 
+test("passes a shared end-to-end timeout budget to music URL requests", async () => {
+  const { handlers, requests } = loadPlugin({
+    response: { status: 200, body: { code: 200, url: "https://cdn.example.test/song.flac" } },
+  });
+
+  await handlers.musicUrl({
+    source: "tx",
+    quality: "hi-res",
+    musicInfo: { songmid: "qq-mid-1" },
+  });
+
+  assert.ok(requests[0].options.timeout > 0);
+  assert.ok(requests[0].options.timeout <= 18_000);
+});
+
 test("does not retry 404 responses without the complete quality-unavailable message", async () => {
   for (const message of ["Music URL not found", "song unavailable at this quality level"]) {
     const { handlers, requests } = loadPlugin({

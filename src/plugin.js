@@ -23,6 +23,8 @@ const CROSS_PLATFORM_MAX_CANDIDATES = 3;
 const CROSS_PLATFORM_REQUEST_BUDGET = 8;
 const CROSS_PLATFORM_TIME_BUDGET = 10_000;
 const CROSS_PLATFORM_LIMIT_ERROR = "CHKSZ_CROSS_PLATFORM_LIMIT";
+const RESOLUTION_TIME_BUDGET = 18_000;
+const RESOLUTION_TIMEOUT_ERROR = "CHKSZ_RESOLUTION_TIMEOUT";
 
 const QUALITY_NAMES = ["lq", "sq", "hq", "lossless", "hi-res"];
 // Logical downgrade ladder shared by every provider: hi-res → lossless → hq → sq → lq.
@@ -280,13 +282,26 @@ const createResolutionCore = () => {
   const isCrossPlatformLimitError = (error) =>
     error?.code === CROSS_PLATFORM_LIMIT_ERROR;
 
+  const isResolutionTimeoutError = (error) =>
+    error?.code === RESOLUTION_TIMEOUT_ERROR;
+
   const isCrossPlatformEnabled = () => {
     const value = splayer.getSetting(CROSS_PLATFORM_SETTING);
     return value === undefined || value === null || value === "" || value === true;
   };
 
-  const requestJson = async (endpoint, params, { budget } = {}) => {
+  const requestJson = async (endpoint, params, { budget, deadline } = {}) => {
     let timeout = REQUEST_TIMEOUT;
+    const remainingResolutionTime = Number.isFinite(deadline)
+      ? deadline - Date.now()
+      : Infinity;
+    if (remainingResolutionTime <= 0) {
+      throw pluginError(
+        RESOLUTION_TIMEOUT_ERROR,
+        "SPlayer 播放地址解析已达到时间上限。",
+      );
+    }
+
     if (budget) {
       const remainingTime = budget.deadline - Date.now();
       if (budget.remaining <= 0 || remainingTime <= 0) {
@@ -297,6 +312,9 @@ const createResolutionCore = () => {
       }
       budget.remaining -= 1;
       timeout = Math.max(1, Math.min(REQUEST_TIMEOUT, remainingTime));
+    }
+    if (Number.isFinite(remainingResolutionTime)) {
+      timeout = Math.max(1, Math.min(timeout, remainingResolutionTime));
     }
 
     const response = await splayer.request(buildApiUrl(endpoint, params), {
@@ -397,7 +415,7 @@ const createResolutionCore = () => {
       });
   };
 
-  const resolveOnPlatform = async (source, quality, id, budget) => {
+  const resolveOnPlatform = async (source, quality, id, requestContext = {}) => {
     const { policy, requestedQuality } = buildTrackParams(source, id, quality);
     const qualityCandidates = selectQualityCandidates(policy, requestedQuality);
     let body;
@@ -407,7 +425,7 @@ const createResolutionCore = () => {
       const { params } = buildTrackParams(source, id, candidateQuality, nativeQuality);
 
       try {
-        body = await requestJson(policy.playback.endpoint, params, { budget });
+        body = await requestJson(policy.playback.endpoint, params, requestContext);
         resolvedQuality = candidateQuality;
         break;
       } catch (error) {
@@ -500,7 +518,7 @@ const createResolutionCore = () => {
     return {};
   };
 
-  const findMatchingTracks = async (source, track, budget) => {
+  const findMatchingTracks = async (source, track, requestContext = {}) => {
     const { search } = getSourcePolicy(source);
     const primaryArtist = track.singer.split(ARTIST_SEPARATOR)[0].trim();
     const keyword = [track.name, primaryArtist].filter(Boolean).join(" ");
@@ -510,7 +528,7 @@ const createResolutionCore = () => {
         ...search.params,
         [search.keywordParameter]: keyword,
       },
-      { budget },
+      requestContext,
     );
 
     const matches = [];
@@ -527,19 +545,25 @@ const createResolutionCore = () => {
       .map(({ candidate, id }) => ({ candidate, id }));
   };
 
-  const resolveAcrossPlatforms = async (policy, quality, track) => {
+  const resolveAcrossPlatforms = async (policy, quality, track, deadline) => {
     const budget = {
       remaining: CROSS_PLATFORM_REQUEST_BUDGET,
-      deadline: Date.now() + CROSS_PLATFORM_TIME_BUDGET,
+      deadline: Math.min(deadline, Date.now() + CROSS_PLATFORM_TIME_BUDGET),
     };
+    const requestContext = { budget, deadline };
 
     for (const targetSource of policy.crossPlatform.sources) {
       const targetPolicy = getSourcePolicy(targetSource);
       try {
-        const matches = await findMatchingTracks(targetSource, track, budget);
+        const matches = await findMatchingTracks(targetSource, track, requestContext);
         for (const { candidate, id } of matches) {
           try {
-            const resolution = await resolveOnPlatform(targetSource, quality, id, budget);
+            const resolution = await resolveOnPlatform(
+              targetSource,
+              quality,
+              id,
+              requestContext,
+            );
             const resolvedCandidate = {
               ...candidate,
               ...extractTrackDetails(resolution.body),
@@ -557,6 +581,7 @@ const createResolutionCore = () => {
             );
             return resolution.result;
           } catch (error) {
+            if (isResolutionTimeoutError(error)) throw error;
             if (isCrossPlatformLimitError(error)) return null;
             if (isAccountError(error)) throw error;
             splayer.log.warn(
@@ -565,6 +590,7 @@ const createResolutionCore = () => {
           }
         }
       } catch (error) {
+        if (isResolutionTimeoutError(error)) throw error;
         if (isCrossPlatformLimitError(error)) return null;
         if (isAccountError(error)) throw error;
         splayer.log.warn(
@@ -578,9 +604,10 @@ const createResolutionCore = () => {
   const resolve = async ({ source, quality, id, track }) => {
     const { policy } = buildTrackParams(source, id, quality);
     const descriptor = getTrackDescriptor(track);
+    const deadline = Date.now() + RESOLUTION_TIME_BUDGET;
 
     try {
-      const resolution = await resolveOnPlatform(source, quality, id);
+      const resolution = await resolveOnPlatform(source, quality, id, { deadline });
       return resolution.result;
     } catch (error) {
       const canCrossSearch =
@@ -590,7 +617,7 @@ const createResolutionCore = () => {
         isCrossPlatformEnabled();
       if (!canCrossSearch) throw error;
 
-      const fallback = await resolveAcrossPlatforms(policy, quality, descriptor);
+      const fallback = await resolveAcrossPlatforms(policy, quality, descriptor, deadline);
       if (fallback) return fallback;
 
       const platformNames = policy.crossPlatform.sources
