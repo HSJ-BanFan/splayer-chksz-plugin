@@ -59,7 +59,14 @@ test("matches an unavailable NetEase song on QQ Music and plays it there", async
       if (url.searchParams.has("msg")) return QQ_SEARCH_HIT;
       return {
         status: 200,
-        body: { code: 200, url: "https://qq.example.test/qingtian.flac", mid: "0039MnYb0qxYhV" },
+        body: {
+          code: 200,
+          name: "晴天",
+          singer: "周杰伦",
+          interval: "04:29",
+          url: "https://qq.example.test/qingtian.flac",
+          mid: "0039MnYb0qxYhV",
+        },
       };
     },
   });
@@ -129,6 +136,53 @@ test("rejects candidates whose duration differs by more than 20 seconds", async 
   assert.ok(!requests.some((request) => new URL(request.url).searchParams.get("id") === "short-edit"));
 });
 
+test("validates QQ candidate duration from the resolved track details", async () => {
+  const { handlers, requests } = loadPlugin({
+    response: (url) => {
+      if (url.pathname === "/api/163_music") return UNAVAILABLE;
+      if (url.pathname === "/api/qq_music" && url.searchParams.has("msg")) {
+        return {
+          status: 200,
+          body: {
+            code: 200,
+            count: 1,
+            list: [{ n: 1, name: "晴天", singer: "周杰伦", mid: "qq-wrong" }],
+          },
+        };
+      }
+      if (url.pathname === "/api/qq_music") {
+        return {
+          status: 200,
+          body: {
+            code: 200,
+            name: "晴天",
+            singer: "周杰伦",
+            interval: "02:00",
+            mid: "qq-wrong",
+            url: "https://qq.example.test/wrong-duration.mp3",
+          },
+        };
+      }
+      return { status: 200, body: { code: 200, list: [] } };
+    },
+  });
+
+  await assert.rejects(
+    handlers.musicUrl({ source: "wy", quality: "hq", musicInfo: JAY_TRACK }),
+    (error) => error.code === "CHKSZ_TRACK_UNAVAILABLE",
+  );
+  assert.deepEqual(
+    requests.map((request) => new URL(request.url).pathname),
+    [
+      "/api/163_music",
+      "/api/163_music",
+      "/api/qq_music",
+      "/api/qq_music",
+      "/api/kugou_music",
+    ],
+  );
+});
+
 test("prefers an exact title over a live or remix variant listed first", async () => {
   const { handlers, requests } = loadPlugin({
     response: (url) => {
@@ -145,7 +199,16 @@ test("prefers an exact title over a live or remix variant listed first", async (
           },
         };
       }
-      return { status: 200, body: { code: 200, url: "https://qq.example.test/studio.mp3" } };
+      return {
+        status: 200,
+        body: {
+          code: 200,
+          name: "晴天",
+          singer: "周杰伦",
+          interval: "04:29",
+          url: "https://qq.example.test/studio.mp3",
+        },
+      };
     },
   });
 

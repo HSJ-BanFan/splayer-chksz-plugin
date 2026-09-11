@@ -250,6 +250,19 @@ const createResolutionCore = () => {
     throw pluginError(code, parts.join("："));
   };
 
+  const throwApiError = (body) => {
+    const apiCode = Number(body?.code);
+    if (!Number.isInteger(apiCode) || apiCode === 200) return;
+
+    const bodyMessage = getBodyMessage(body);
+    const isHttpStatus = apiCode >= 400 && apiCode <= 599;
+    const prefix = isHttpStatus
+      ? `ChKSz 请求失败（HTTP ${apiCode}）`
+      : `ChKSz 返回错误码 ${apiCode}`;
+    const code = isHttpStatus ? `CHKSZ_HTTP_${apiCode}` : `CHKSZ_API_${apiCode}`;
+    throw pluginError(code, bodyMessage ? `${prefix}：${bodyMessage}` : prefix);
+  };
+
   const isUnavailableQualityError = (error) =>
     error?.code === "CHKSZ_HTTP_404" &&
     /music url not found\s*,\s*song may be unavailable at this quality level/i.test(
@@ -287,6 +300,7 @@ const createResolutionCore = () => {
       );
     }
 
+    throwApiError(response.body);
     return response.body;
   };
 
@@ -384,7 +398,7 @@ const createResolutionCore = () => {
 
     const result = normalisePlaybackResponse(body);
     result.quality = resolvedQuality;
-    return result;
+    return { result, body };
   };
 
   const normaliseText = (value) =>
@@ -411,7 +425,7 @@ const createResolutionCore = () => {
   };
 
   /** 0 = different song, 1 = title contains/contained, 2 = exact title. */
-  const matchScore = (track, candidate) => {
+  const matchScore = (track, candidate, { requireDuration = false } = {}) => {
     if (!isRecord(candidate)) return 0;
     const wantedName = normaliseText(track.name);
     const candidateName = normaliseText(candidate.name);
@@ -433,6 +447,7 @@ const createResolutionCore = () => {
     const candidateSeconds = parseDurationSeconds(
       candidate.duration ?? candidate.interval,
     );
+    if (requireDuration && wantedSeconds && !candidateSeconds) return 0;
     if (
       wantedSeconds &&
       candidateSeconds &&
@@ -451,7 +466,21 @@ const createResolutionCore = () => {
     return [];
   };
 
-  const findMatchingTrack = async (source, track) => {
+  const extractTrackDetails = (body) => {
+    for (const container of [body, body?.data, body?.result]) {
+      if (!isRecord(container)) continue;
+      const details = {};
+      for (const key of ["name", "singer", "interval", "duration"]) {
+        if (container[key] !== undefined && container[key] !== null && container[key] !== "") {
+          details[key] = container[key];
+        }
+      }
+      if (Object.keys(details).length > 0) return details;
+    }
+    return {};
+  };
+
+  const findMatchingTracks = async (source, track) => {
     const { search } = getSourcePolicy(source);
     const primaryArtist = track.singer.split(ARTIST_SEPARATOR)[0].trim();
     const keyword = [track.name, primaryArtist].filter(Boolean).join(" ");
@@ -460,28 +489,50 @@ const createResolutionCore = () => {
       [search.keywordParameter]: keyword,
     });
 
-    let best = { score: 0, id: null };
+    const matches = [];
     for (const candidate of extractCandidates(body)) {
       const score = matchScore(track, candidate);
-      if (score <= best.score) continue;
+      if (score <= 0 || !isRecord(candidate)) continue;
       const rawId = candidate[search.candidateIdField];
       const id = typeof rawId === "number" ? String(rawId) : textOrEmpty(rawId);
-      if (id) best = { score, id };
+      if (id) matches.push({ candidate, id, score });
     }
-    return best.id;
+    return matches
+      .sort((left, right) => right.score - left.score)
+      .map(({ candidate, id }) => ({ candidate, id }));
   };
 
   const resolveAcrossPlatforms = async (policy, quality, track) => {
     for (const targetSource of policy.crossPlatform.sources) {
       const targetPolicy = getSourcePolicy(targetSource);
       try {
-        const id = await findMatchingTrack(targetSource, track);
-        if (!id) continue;
-        const result = await resolveOnPlatform(targetSource, quality, id);
-        splayer.log.info(
-          `《${track.name}》在${policy.name}不可用，已改用 ${targetPolicy.name} 播放（${id}）。`,
-        );
-        return result;
+        const matches = await findMatchingTracks(targetSource, track);
+        for (const { candidate, id } of matches) {
+          try {
+            const resolution = await resolveOnPlatform(targetSource, quality, id);
+            const resolvedCandidate = {
+              ...candidate,
+              ...extractTrackDetails(resolution.body),
+            };
+            const requireDuration = parseDurationSeconds(track.interval) > 0;
+            if (matchScore(track, resolvedCandidate, { requireDuration }) <= 0) {
+              splayer.log.warn(
+                `${targetPolicy.name} 候选（${id}）未通过《${track.name}》的时长校验。`,
+              );
+              continue;
+            }
+
+            splayer.log.info(
+              `《${track.name}》在${policy.name}不可用，已改用 ${targetPolicy.name} 播放（${id}）。`,
+            );
+            return resolution.result;
+          } catch (error) {
+            if (isAccountError(error)) throw error;
+            splayer.log.warn(
+              `${targetPolicy.name} 匹配《${track.name}》失败：${error?.message ?? error}`,
+            );
+          }
+        }
       } catch (error) {
         if (isAccountError(error)) throw error;
         splayer.log.warn(
@@ -497,7 +548,8 @@ const createResolutionCore = () => {
     const descriptor = getTrackDescriptor(track);
 
     try {
-      return await resolveOnPlatform(source, quality, id);
+      const resolution = await resolveOnPlatform(source, quality, id);
+      return resolution.result;
     } catch (error) {
       const canCrossSearch =
         Boolean(policy.crossPlatform) &&

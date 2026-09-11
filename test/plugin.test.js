@@ -108,6 +108,51 @@ test("does not retry unrelated NetEase 404 responses", async () => {
   assert.equal(requests.length, 1);
 });
 
+test("treats a ChKSz business 404 as an unavailable quality", async () => {
+  const requestedLevels = [];
+  const { handlers, requests } = loadPlugin({
+    response: (url) => {
+      const level = url.searchParams.get("level");
+      requestedLevels.push(level);
+      if (level === "exhigh") {
+        return {
+          status: 200,
+          body: {
+            code: 404,
+            msg: "Music URL not found, song may be unavailable at this quality level",
+          },
+        };
+      }
+      return { status: 200, body: { code: 200, url: "https://cdn.example.test/song.mp3" } };
+    },
+  });
+
+  const result = await handlers.musicUrl({
+    source: "wy",
+    quality: "hq",
+    musicInfo: { id: "business-error-track" },
+  });
+
+  assert.deepEqual(requestedLevels, ["exhigh", "standard"]);
+  assert.equal(requests.length, 2);
+  assert.equal(result.quality, "lq");
+});
+
+test("surfaces a ChKSz business account error from a successful HTTP response", async () => {
+  const { handlers, requests } = loadPlugin({
+    response: {
+      status: 200,
+      body: { code: 402, msg: "今日额度已用尽" },
+    },
+  });
+
+  await assert.rejects(
+    handlers.musicUrl({ source: "wy", quality: "hq", musicInfo: { id: "123" } }),
+    (error) => error.code === "CHKSZ_HTTP_402" && error.message.includes("今日额度已用尽"),
+  );
+  assert.equal(requests.length, 1);
+});
+
 test("does not retry 404 responses without the complete quality-unavailable message", async () => {
   for (const message of ["Music URL not found", "song unavailable at this quality level"]) {
     const { handlers, requests } = loadPlugin({
