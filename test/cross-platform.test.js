@@ -398,6 +398,60 @@ test("continues to the next platform after an unrelated matching failure", async
   assert.ok(logs.some((entry) => entry.level === "warn" && /QQ 音乐服务暂不可用/.test(entry.args.join(" "))));
 });
 
+test("preserves a final cross-platform provider error", async () => {
+  const { handlers } = loadPlugin({
+    response: (url) => {
+      if (url.pathname === "/api/163_music") return UNAVAILABLE;
+      if (url.pathname === "/api/qq_music") {
+        return { status: 503, body: { msg: "provider temporarily unavailable" } };
+      }
+      return { status: 200, body: { code: 200, list: [] } };
+    },
+  });
+
+  await assert.rejects(
+    handlers.musicUrl({ source: "wy", quality: "hq", musicInfo: JAY_TRACK }),
+    (error) =>
+      error.code === "CHKSZ_HTTP_503" &&
+      error.message.includes("provider temporarily unavailable"),
+  );
+});
+
+test("rejects a version-only candidate instead of playing it as the original", async () => {
+  const { handlers } = loadPlugin({
+    response: (url) => {
+      if (url.pathname === "/api/163_music") return UNAVAILABLE;
+      if (url.pathname === "/api/qq_music" && url.searchParams.has("msg")) {
+        return {
+          status: 200,
+          body: {
+            code: 200,
+            list: [{ name: "晴天 Live", singer: "周杰伦", interval: "04:29", mid: "qq-live" }],
+          },
+        };
+      }
+      if (url.pathname === "/api/qq_music") {
+        return {
+          status: 200,
+          body: {
+            code: 200,
+            name: "晴天 Live",
+            singer: "周杰伦",
+            interval: "04:29",
+            url: "https://qq.example.test/live.mp3",
+          },
+        };
+      }
+      return { status: 200, body: { code: 200, list: [] } };
+    },
+  });
+
+  await assert.rejects(
+    handlers.musicUrl({ source: "wy", quality: "lq", musicInfo: JAY_TRACK }),
+    (error) => error.code === "CHKSZ_TRACK_UNAVAILABLE",
+  );
+});
+
 test("does not cross-search for QQ Music or Kugou tracks", async () => {
   for (const source of ["tx", "kg"]) {
     const { handlers, requests } = loadPlugin({ response: UNAVAILABLE });

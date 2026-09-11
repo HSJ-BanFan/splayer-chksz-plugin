@@ -295,15 +295,29 @@ const createResolutionCore = () => {
   const isRequestTimeoutError = (error) =>
     error?.code === REQUEST_TIMEOUT_ERROR;
 
+  const isHostRequestTimeoutError = (error) =>
+    ["PLUGIN_REQUEST_TIMEOUT", "REQUEST_TIMEOUT", "ETIMEDOUT", "ESOCKETTIMEDOUT"].includes(
+      String(error?.code),
+    ) || error?.name === "TimeoutError";
+
   const isOperationalError = (error) =>
     error?.code === NETWORK_ERROR || isRequestTimeoutError(error);
+
+  const isProviderError = (error) =>
+    /^CHKSZ_(HTTP(?:_\d{3}|_ERROR)|API_|INVALID_RESPONSE)/.test(
+      String(error?.code),
+    );
 
   const isCrossPlatformEnabled = () => {
     const value = splayer.getSetting(CROSS_PLATFORM_SETTING);
     return value === undefined || value === null || value === "" || value === true;
   };
 
-  const requestWithTimeout = async (url, options) => {
+  const requestWithTimeout = async (
+    url,
+    options,
+    timeoutCode = REQUEST_TIMEOUT_ERROR,
+  ) => {
     const timeout = Number(options?.timeout) > 0 ? Number(options.timeout) : REQUEST_TIMEOUT;
     let timer;
     try {
@@ -313,8 +327,12 @@ const createResolutionCore = () => {
           timer = setTimeout(() => {
             reject(
               pluginError(
-                REQUEST_TIMEOUT_ERROR,
-                `ChKSz 请求超过 ${timeout} 毫秒。`,
+                timeoutCode,
+                timeoutCode === RESOLUTION_TIMEOUT_ERROR
+                  ? "SPlayer 播放地址解析已达到时间上限。"
+                  : timeoutCode === CROSS_PLATFORM_LIMIT_ERROR
+                    ? "ChKSz 跨平台兜底已达到请求或时间上限。"
+                    : `ChKSz 请求超过 ${timeout} 毫秒。`,
               ),
             );
           }, timeout);
@@ -327,6 +345,7 @@ const createResolutionCore = () => {
 
   const requestJson = async (endpoint, params, { budget, deadline } = {}) => {
     let timeout = REQUEST_TIMEOUT;
+    let timeoutCode = REQUEST_TIMEOUT_ERROR;
     const remainingResolutionTime = Number.isFinite(deadline)
       ? deadline - Date.now()
       : Infinity;
@@ -347,8 +366,12 @@ const createResolutionCore = () => {
       }
       budget.remaining -= 1;
       timeout = Math.max(1, Math.min(REQUEST_TIMEOUT, remainingTime));
+      timeoutCode = CROSS_PLATFORM_LIMIT_ERROR;
     }
     if (Number.isFinite(remainingResolutionTime)) {
+      if (remainingResolutionTime < timeout) {
+        timeoutCode = RESOLUTION_TIMEOUT_ERROR;
+      }
       timeout = Math.max(1, Math.min(timeout, remainingResolutionTime));
     }
 
@@ -360,9 +383,35 @@ const createResolutionCore = () => {
     };
     let response;
     try {
-      response = await requestWithTimeout(requestUrl, requestOptions);
+      response = await requestWithTimeout(requestUrl, requestOptions, timeoutCode);
     } catch (error) {
-      if (isRequestTimeoutError(error)) throw error;
+      if (
+        isRequestTimeoutError(error) ||
+        isResolutionTimeoutError(error) ||
+        isCrossPlatformLimitError(error)
+      ) {
+        throw error;
+      }
+      if (isHostRequestTimeoutError(error)) {
+        const hostTimeoutCode =
+          timeoutCode === RESOLUTION_TIMEOUT_ERROR &&
+          Number.isFinite(deadline) &&
+          Date.now() >= deadline
+            ? RESOLUTION_TIMEOUT_ERROR
+            : timeoutCode === CROSS_PLATFORM_LIMIT_ERROR &&
+                budget &&
+                Date.now() >= budget.deadline
+              ? CROSS_PLATFORM_LIMIT_ERROR
+              : REQUEST_TIMEOUT_ERROR;
+        throw pluginError(
+          hostTimeoutCode,
+          hostTimeoutCode === RESOLUTION_TIMEOUT_ERROR
+            ? "SPlayer 播放地址解析已达到时间上限。"
+            : hostTimeoutCode === CROSS_PLATFORM_LIMIT_ERROR
+              ? "ChKSz 跨平台兜底已达到请求或时间上限。"
+              : `ChKSz 请求超过 ${timeout} 毫秒。`,
+        );
+      }
       throw pluginError(
         NETWORK_ERROR,
         `ChKSz 网络请求失败：${redactSensitiveData(error?.message ?? error)}`,
@@ -493,8 +542,7 @@ const createResolutionCore = () => {
   const splitArtists = (value) =>
     String(value ?? "").split(ARTIST_SEPARATOR).map(normaliseText).filter(Boolean);
 
-  const looselyEqual = (a, b) =>
-    Boolean(a) && Boolean(b) && (a === b || a.includes(b) || b.includes(a));
+  const exactlyEqual = (a, b) => Boolean(a) && Boolean(b) && a === b;
 
   const parseDurationSeconds = (value) => {
     if (typeof value === "number") {
@@ -508,21 +556,21 @@ const createResolutionCore = () => {
     return parseDurationSeconds(Number(text));
   };
 
-  /** 0 = different song, 1 = title contains/contained, 2 = exact title. */
+  /** 0 = different song, 2 = exact normalised title. */
   const matchScore = (track, candidate, { requireDuration = false } = {}) => {
     if (!isRecord(candidate)) return 0;
     const wantedName = normaliseText(track.name);
     const candidateName = normaliseText(candidate.name);
-    if (!looselyEqual(wantedName, candidateName)) return 0;
+    if (!exactlyEqual(wantedName, candidateName)) return 0;
 
     const wantedArtists = splitArtists(track.singer);
     const candidateArtists = splitArtists(candidate.singer);
     if (
       wantedArtists.length &&
-      candidateArtists.length &&
-      !wantedArtists.some((artist) =>
-        candidateArtists.some((other) => looselyEqual(artist, other)),
-      )
+      (!candidateArtists.length ||
+        !wantedArtists.some((artist) =>
+          candidateArtists.some((other) => exactlyEqual(artist, other)),
+        ))
     ) {
       return 0;
     }
@@ -597,11 +645,14 @@ const createResolutionCore = () => {
       deadline: Math.min(deadline, Date.now() + CROSS_PLATFORM_TIME_BUDGET),
     };
     const requestContext = { budget, deadline };
-    let firstOperationalError;
+    let firstRecoverableError;
 
-    const rememberOperationalError = (error) => {
-      if (!firstOperationalError && isOperationalError(error)) {
-        firstOperationalError = error;
+    const rememberRecoverableError = (error) => {
+      if (
+        !firstRecoverableError &&
+        (isOperationalError(error) || isProviderError(error))
+      ) {
+        firstRecoverableError = error;
       }
     };
 
@@ -647,7 +698,7 @@ const createResolutionCore = () => {
             if (isResolutionTimeoutError(error)) throw error;
             if (isCrossPlatformLimitError(error)) throw error;
             if (isAccountError(error)) throw error;
-            rememberOperationalError(error);
+            rememberRecoverableError(error);
             splayer.log.warn(
               `${targetPolicy.name} 匹配《${track.name}》失败：${error?.message ?? error}`,
             );
@@ -657,7 +708,7 @@ const createResolutionCore = () => {
         if (isResolutionTimeoutError(error)) throw error;
         if (isCrossPlatformLimitError(error)) throw error;
         if (isAccountError(error)) throw error;
-        rememberOperationalError(error);
+        rememberRecoverableError(error);
         splayer.log.warn(
           `${targetPolicy.name} 匹配《${track.name}》失败：${error?.message ?? error}`,
         );
@@ -670,7 +721,7 @@ const createResolutionCore = () => {
         "ChKSz 跨平台兜底已达到请求或时间上限。",
       );
     }
-    if (firstOperationalError) throw firstOperationalError;
+    if (firstRecoverableError) throw firstRecoverableError;
     return null;
   };
 

@@ -168,7 +168,7 @@ test("passes a shared end-to-end timeout budget to music URL requests", async ()
   assert.ok(requests[0].options.timeout <= 18_000);
 });
 
-test("enforces the request timeout even when the host ignores its timeout option", async () => {
+test("reports the resolution timeout when the host ignores the total deadline", async () => {
   const sourceText = pluginSource.replace(
     "const RESOLUTION_TIME_BUDGET = 18_000;",
     "const RESOLUTION_TIME_BUDGET = 20;",
@@ -187,6 +187,21 @@ test("enforces the request timeout even when the host ignores its timeout option
       quality: "hi-res",
       musicInfo: { songmid: "qq-mid-1" },
     }),
+    (error) => error.code === "CHKSZ_RESOLUTION_TIMEOUT",
+  );
+});
+
+test("normalises host request timeout errors", async () => {
+  const { handlers } = loadPlugin({
+    response: () => {
+      const error = new Error("host request deadline exceeded");
+      error.code = "PLUGIN_REQUEST_TIMEOUT";
+      throw error;
+    },
+  });
+
+  await assert.rejects(
+    handlers.musicUrl({ source: "tx", quality: "hq", musicInfo: { songmid: "qq-mid-1" } }),
     (error) => error.code === "CHKSZ_REQUEST_TIMEOUT",
   );
 });
