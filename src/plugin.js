@@ -256,7 +256,9 @@ const createResolutionCore = () => {
 
     if (status === 429) {
       const retryAfter = getHeader(response?.headers, "retry-after");
-      if (retryAfter) parts.push(`请在 ${retryAfter} 秒后再试`);
+      if (retryAfter) {
+        parts.push(`请在 ${redactSensitiveData(retryAfter)} 秒后再试`);
+      }
     }
 
     const code = status > 0 ? `CHKSZ_HTTP_${status}` : "CHKSZ_HTTP_ERROR";
@@ -715,13 +717,14 @@ const createResolutionCore = () => {
       }
     }
 
+    if (firstRecoverableError) throw firstRecoverableError;
+
     if (budget.remaining <= 0 || budget.deadline - Date.now() <= 0) {
       throw pluginError(
         CROSS_PLATFORM_LIMIT_ERROR,
         "ChKSz 跨平台兜底已达到请求或时间上限。",
       );
     }
-    if (firstRecoverableError) throw firstRecoverableError;
     return null;
   };
 

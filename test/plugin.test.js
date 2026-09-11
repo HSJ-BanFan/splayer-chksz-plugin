@@ -502,6 +502,24 @@ test("surfaces HTTP errors and Retry-After without retrying", async () => {
   assert.equal(requests.length, 1);
 });
 
+test("redacts API keys from Retry-After errors", async () => {
+  const { handlers } = loadPlugin({
+    response: {
+      status: 429,
+      headers: { "retry-after": "chksz_retry_key" },
+      body: { msg: "请求过于频繁" },
+    },
+  });
+
+  await assert.rejects(
+    handlers.musicUrl({ source: "wy", quality: "hq", musicInfo: { id: "123" } }),
+    (error) =>
+      error.code === "CHKSZ_HTTP_429" &&
+      !error.message.includes("chksz_retry_key") &&
+      error.message.includes("[REDACTED]"),
+  );
+});
+
 test("fails before making a request when the API key is missing", async () => {
   const { handlers, requests } = loadPlugin({ apiKey: "" });
 

@@ -417,6 +417,39 @@ test("preserves a final cross-platform provider error", async () => {
   );
 });
 
+test("preserves a provider error when the cross-platform budget is exhausted", async () => {
+  const qqCandidates = Array.from({ length: 3 }, (_, index) => ({
+    name: "晴天",
+    singer: "周杰伦",
+    mid: `qq-error-${index + 1}`,
+  }));
+  const kugouCandidates = Array.from({ length: 3 }, (_, index) => ({
+    name: "晴天",
+    singer: "周杰伦",
+    duration: 269,
+    id: `kg-error-${index + 1}`,
+  }));
+  const { handlers } = loadPlugin({
+    response: (url) => {
+      if (url.pathname === "/api/163_music") return UNAVAILABLE;
+      if (url.pathname === "/api/qq_music" && url.searchParams.has("msg")) {
+        return { status: 200, body: { code: 200, list: qqCandidates } };
+      }
+      if (url.pathname === "/api/kugou_music" && url.searchParams.has("msg")) {
+        return { status: 200, body: { code: 200, list: kugouCandidates } };
+      }
+      return { status: 503, body: { msg: "provider temporarily unavailable" } };
+    },
+  });
+
+  await assert.rejects(
+    handlers.musicUrl({ source: "wy", quality: "hq", musicInfo: JAY_TRACK }),
+    (error) =>
+      error.code === "CHKSZ_HTTP_503" &&
+      error.message.includes("provider temporarily unavailable"),
+  );
+});
+
 test("rejects a version-only candidate instead of playing it as the original", async () => {
   const { handlers } = loadPlugin({
     response: (url) => {
