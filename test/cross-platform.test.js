@@ -245,7 +245,7 @@ test("does not cross-search for QQ Music or Kugou tracks", async () => {
 test("downgrades QQ Music and Kugou qualities on the same unavailable signal", async () => {
   const { handlers, requests } = loadPlugin({
     response: (url) =>
-      url.searchParams.get("size") === "master"
+      ["master", "hires"].includes(url.searchParams.get("size"))
         ? UNAVAILABLE
         : { status: 200, body: { code: 200, url: "https://cdn.example.test/song.flac" } },
   });
@@ -255,7 +255,7 @@ test("downgrades QQ Music and Kugou qualities on the same unavailable signal", a
 
   assert.deepEqual(
     requests.map((request) => new URL(request.url).searchParams.get("size")),
-    ["master", "flac", "master", "flac"],
+    ["master", "hires", "flac", "master", "hires", "flac"],
   );
   assert.equal(qq.quality, "lossless");
   assert.equal(kugou.quality, "lossless");

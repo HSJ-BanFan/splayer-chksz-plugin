@@ -43,6 +43,7 @@ const SOURCE_POLICIES = {
         sq: "exhigh",
         lq: "standard",
       },
+      qualityAlternatives: { "hi-res": ["hires"] },
       qualityFallbacks: QUALITY_FALLBACKS,
     },
     // NetEase lacks the rights to many catalogues; look the same song up elsewhere.
@@ -68,6 +69,7 @@ const SOURCE_POLICIES = {
         sq: "320k",
         lq: "128k",
       },
+      qualityAlternatives: { "hi-res": ["hires"] },
       qualityFallbacks: QUALITY_FALLBACKS,
     },
     search: {
@@ -94,6 +96,7 @@ const SOURCE_POLICIES = {
         sq: "320k",
         lq: "128k",
       },
+      qualityAlternatives: { "hi-res": ["hires"] },
       qualityFallbacks: QUALITY_FALLBACKS,
     },
     search: {
@@ -155,7 +158,7 @@ const getSourcePolicy = (source) => {
   return policy;
 };
 
-const buildTrackParams = (source, id, quality) => {
+const buildTrackParams = (source, id, quality, nativeQualityOverride) => {
   const policy = getSourcePolicy(source);
   const requestedQuality = QUALITY_NAMES.includes(quality) ? quality : "hq";
   return {
@@ -164,7 +167,7 @@ const buildTrackParams = (source, id, quality) => {
     params: {
       [policy.identity.idParameter]: id,
       [policy.playback.qualityParameter]:
-        policy.playback.qualityValues[requestedQuality],
+        nativeQualityOverride ?? policy.playback.qualityValues[requestedQuality],
       type: "json",
     },
   };
@@ -346,12 +349,18 @@ const createResolutionCore = () => {
     const attemptedNativeQualities = new Set();
     const { qualityValues } = policy.playback;
 
-    return logicalQualities.filter((candidateQuality) => {
-      const nativeQuality = qualityValues[candidateQuality];
-      if (attemptedNativeQualities.has(nativeQuality)) return false;
-      attemptedNativeQualities.add(nativeQuality);
-      return true;
-    });
+    return logicalQualities
+      .flatMap((candidateQuality) =>
+        [
+          qualityValues[candidateQuality],
+          ...(policy.playback.qualityAlternatives?.[candidateQuality] ?? []),
+        ].map((nativeQuality) => ({ candidateQuality, nativeQuality })),
+      )
+      .filter(({ nativeQuality }) => {
+        if (attemptedNativeQualities.has(nativeQuality)) return false;
+        attemptedNativeQualities.add(nativeQuality);
+        return true;
+      });
   };
 
   const resolveOnPlatform = async (source, quality, id) => {
@@ -360,8 +369,8 @@ const createResolutionCore = () => {
     let body;
     let resolvedQuality = requestedQuality;
 
-    for (const [index, candidateQuality] of qualityCandidates.entries()) {
-      const { params } = buildTrackParams(source, id, candidateQuality);
+    for (const [index, { candidateQuality, nativeQuality }] of qualityCandidates.entries()) {
+      const { params } = buildTrackParams(source, id, candidateQuality, nativeQuality);
 
       try {
         body = await requestJson(policy.playback.endpoint, params);

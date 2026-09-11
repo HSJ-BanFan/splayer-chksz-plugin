@@ -129,7 +129,7 @@ test("falls through the supported NetEase quality ladder and reports the effecti
       const level = url.searchParams.get("level");
       requestedLevels.push(level);
 
-      if (["jymaster", "lossless", "exhigh"].includes(level)) {
+      if (["jymaster", "hires", "lossless", "exhigh"].includes(level)) {
         return {
           status: 404,
           body: { msg: "Music URL not found, song may be unavailable at this quality level" },
@@ -146,7 +146,7 @@ test("falls through the supported NetEase quality ladder and reports the effecti
     musicInfo: { id: "123" },
   });
 
-  assert.deepEqual(requestedLevels, ["jymaster", "lossless", "exhigh", "standard"]);
+  assert.deepEqual(requestedLevels, ["jymaster", "hires", "lossless", "exhigh", "standard"]);
   assert.equal(result.quality, "lq");
 });
 
@@ -209,6 +209,36 @@ test("maps SPlayer hi-res to each provider's top ChKSz quality", async () => {
       { path: "/api/kugou_music", quality: "master" },
     ],
   );
+});
+
+test("tries each provider's native hires quality before falling to lossless", async () => {
+  const requestedQualities = [];
+  const { handlers } = loadPlugin({
+    response: (url) => {
+      const quality = url.searchParams.get("level") ?? url.searchParams.get("size");
+      requestedQualities.push(quality);
+      if (["jymaster", "master"].includes(quality)) {
+        return {
+          status: 404,
+          body: { msg: "Music URL not found, song may be unavailable at this quality level" },
+        };
+      }
+      return { status: 200, body: { url: "https://cdn.example.test/song.flac" } };
+    },
+  });
+
+  await handlers.musicUrl({ source: "wy", quality: "hi-res", musicInfo: { id: "wy-id-1" } });
+  await handlers.musicUrl({ source: "tx", quality: "hi-res", musicInfo: { songmid: "qq-mid-1" } });
+  await handlers.musicUrl({ source: "kg", quality: "hi-res", musicInfo: { id: "kg-id-1" } });
+
+  assert.deepEqual(requestedQualities, [
+    "jymaster",
+    "hires",
+    "master",
+    "hires",
+    "master",
+    "hires",
+  ]);
 });
 
 test("parses NetEase lyrics and translation", async () => {
