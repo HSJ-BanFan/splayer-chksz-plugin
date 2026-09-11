@@ -230,10 +230,27 @@ test("redacts API keys from cross-platform network warnings", async () => {
       quality: "lq",
       musicInfo: { id: "wy-id-1", name: "晴天", singer: "周杰伦", interval: "04:29" },
     }),
-    (error) => error.code === "CHKSZ_TRACK_UNAVAILABLE",
+    (error) => error.code === "CHKSZ_NETWORK_ERROR" && !error.message.includes("chksz_test_key"),
   );
   assert.ok(
     logs.every((entry) => !entry.args.join(" ").includes("chksz_test_key")),
+  );
+});
+
+test("redacts API keys from no-URL response errors", async () => {
+  const { handlers } = loadPlugin({
+    response: {
+      status: 200,
+      body: { code: 200, msg: "upstream apikey=chksz_test_key" },
+    },
+  });
+
+  await assert.rejects(
+    handlers.musicUrl({ source: "tx", quality: "hq", musicInfo: { songmid: "qq-mid-1" } }),
+    (error) =>
+      error.code === "CHKSZ_NO_URL" &&
+      !error.message.includes("chksz_test_key") &&
+      error.message.includes("[REDACTED]"),
   );
 });
 

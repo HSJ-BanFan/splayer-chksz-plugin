@@ -295,6 +295,9 @@ const createResolutionCore = () => {
   const isRequestTimeoutError = (error) =>
     error?.code === REQUEST_TIMEOUT_ERROR;
 
+  const isOperationalError = (error) =>
+    error?.code === NETWORK_ERROR || isRequestTimeoutError(error);
+
   const isCrossPlatformEnabled = () => {
     const value = splayer.getSetting(CROSS_PLATFORM_SETTING);
     return value === undefined || value === null || value === "" || value === true;
@@ -424,7 +427,7 @@ const createResolutionCore = () => {
   const normalisePlaybackResponse = (body) => {
     const url = extractUrl(body);
     if (!url) {
-      const message = getBodyMessage(body);
+      const message = redactSensitiveData(getBodyMessage(body));
       throw pluginError(
         "CHKSZ_NO_URL",
         message ? `ChKSz 未返回播放地址：${message}` : "ChKSz 未返回播放地址。",
@@ -594,6 +597,13 @@ const createResolutionCore = () => {
       deadline: Math.min(deadline, Date.now() + CROSS_PLATFORM_TIME_BUDGET),
     };
     const requestContext = { budget, deadline };
+    let firstOperationalError;
+
+    const rememberOperationalError = (error) => {
+      if (!firstOperationalError && isOperationalError(error)) {
+        firstOperationalError = error;
+      }
+    };
 
     for (const targetSource of policy.crossPlatform.sources) {
       const targetPolicy = getSourcePolicy(targetSource);
@@ -612,6 +622,16 @@ const createResolutionCore = () => {
               ...extractTrackDetails(resolution.body),
             };
             const requireDuration = parseDurationSeconds(track.interval) > 0;
+            if (
+              targetSource === "tx" &&
+              requireDuration &&
+              parseDurationSeconds(resolvedCandidate.interval) <= 0
+            ) {
+              splayer.log.warn(
+                `${targetPolicy.name} 候选（${id}）详情缺少有效时长，跳过《${track.name}》。`,
+              );
+              continue;
+            }
             if (matchScore(track, resolvedCandidate, { requireDuration }) <= 0) {
               splayer.log.warn(
                 `${targetPolicy.name} 候选（${id}）未通过《${track.name}》的时长校验。`,
@@ -625,8 +645,9 @@ const createResolutionCore = () => {
             return resolution.result;
           } catch (error) {
             if (isResolutionTimeoutError(error)) throw error;
-            if (isCrossPlatformLimitError(error)) return null;
+            if (isCrossPlatformLimitError(error)) throw error;
             if (isAccountError(error)) throw error;
+            rememberOperationalError(error);
             splayer.log.warn(
               `${targetPolicy.name} 匹配《${track.name}》失败：${error?.message ?? error}`,
             );
@@ -634,13 +655,22 @@ const createResolutionCore = () => {
         }
       } catch (error) {
         if (isResolutionTimeoutError(error)) throw error;
-        if (isCrossPlatformLimitError(error)) return null;
+        if (isCrossPlatformLimitError(error)) throw error;
         if (isAccountError(error)) throw error;
+        rememberOperationalError(error);
         splayer.log.warn(
           `${targetPolicy.name} 匹配《${track.name}》失败：${error?.message ?? error}`,
         );
       }
     }
+
+    if (budget.remaining <= 0 || budget.deadline - Date.now() <= 0) {
+      throw pluginError(
+        CROSS_PLATFORM_LIMIT_ERROR,
+        "ChKSz 跨平台兜底已达到请求或时间上限。",
+      );
+    }
+    if (firstOperationalError) throw firstOperationalError;
     return null;
   };
 

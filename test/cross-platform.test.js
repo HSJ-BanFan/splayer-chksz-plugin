@@ -233,7 +233,7 @@ test("bounds cross-platform candidate probes and API requests", async () => {
 
   await assert.rejects(
     handlers.musicUrl({ source: "wy", quality: "hq", musicInfo: JAY_TRACK }),
-    (error) => error.code === "CHKSZ_TRACK_UNAVAILABLE",
+    (error) => error.code === "CHKSZ_CROSS_PLATFORM_LIMIT",
   );
 
   const fallbackRequests = requests.slice(2);
@@ -250,6 +250,41 @@ test("bounds cross-platform candidate probes and API requests", async () => {
       "/api/kugou_music",
       "/api/kugou_music",
     ],
+  );
+});
+
+test("rejects a QQ candidate when its details omit the required interval", async () => {
+  const { handlers } = loadPlugin({
+    response: (url) => {
+      if (url.pathname === "/api/163_music") return UNAVAILABLE;
+      if (url.pathname === "/api/qq_music" && url.searchParams.has("msg")) {
+        return {
+          status: 200,
+          body: {
+            code: 200,
+            list: [{ name: "晴天", singer: "周杰伦", duration: 269, mid: "qq-missing-interval" }],
+          },
+        };
+      }
+      if (url.pathname === "/api/qq_music") {
+        return {
+          status: 200,
+          body: {
+            code: 200,
+            name: "晴天",
+            singer: "周杰伦",
+            url: "https://qq.example.test/missing-interval.mp3",
+            mid: "qq-missing-interval",
+          },
+        };
+      }
+      return { status: 200, body: { code: 200, list: [] } };
+    },
+  });
+
+  await assert.rejects(
+    handlers.musicUrl({ source: "wy", quality: "lq", musicInfo: JAY_TRACK }),
+    (error) => error.code === "CHKSZ_TRACK_UNAVAILABLE",
   );
 });
 

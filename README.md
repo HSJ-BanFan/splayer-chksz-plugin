@@ -106,7 +106,7 @@ SPlayer-Next 先用内置官方接口解析播放地址，只有官方接口拿�
 
 ## 错误处理
 
-插件直接把 ChKSz 的 HTTP 错误和 `msg` 转换为 SPlayer 插件错误：
+插件会检查 HTTP 状态和 JSON 响应体中的 `code`，并把错误转换为 SPlayer 插件错误。HTTP 状态或响应体 `code` 在 `400`–`599` 时使用 `CHKSZ_HTTP_<code>`，其他非 `200` 响应体代码使用 `CHKSZ_API_<code>`；HTTP 成功但没有播放地址时使用 `CHKSZ_NO_URL`：
 
 - `401`：Key 缺失、无效或登录失效；
 - `402`：额度耗尽；
@@ -114,7 +114,7 @@ SPlayer-Next 先用内置官方接口解析播放地址，只有官方接口拿�
 - `429`：超过速率限制，并显示 `Retry-After`；
 - `503`：服务暂不可用。
 
-网络异常会转换为 `CHKSZ_NETWORK_ERROR`，请求超时会转换为 `CHKSZ_REQUEST_TIMEOUT` 或 `CHKSZ_RESOLUTION_TIMEOUT`；错误和日志会隐藏 API Key。
+网络异常会转换为 `CHKSZ_NETWORK_ERROR`，单次请求超时会转换为 `CHKSZ_REQUEST_TIMEOUT`，整个播放地址解析超时会转换为 `CHKSZ_RESOLUTION_TIMEOUT`；跨平台兜底达到请求或时间上限时使用 `CHKSZ_CROSS_PLATFORM_LIMIT`。错误和日志会隐藏 API Key。
 
 插件不会对 `401`、`402`、`403`、`429` 无限重试；`429` 也不会在插件内部自动等待重试。三个平台仅对明确表示音质不可用的 `404` 尝试较低音质，逻辑降级顺序为 `hi-res` → `lossless` → `hq` → `sq` → `lq`；由于 ChKSz 将 `hq` 和 `sq` 映射到同一个原生音质（网易云 `exhigh`，QQ 音乐和酷狗 `320k`），相同的 API 音质不会重复请求。跨平台匹配过程中遇到 `401`、`402`、`403`、`429` 会立即停止并原样抛出；其他匹配失败只记录警告并继续尝试下一个平台。
 
