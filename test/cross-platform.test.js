@@ -262,7 +262,7 @@ test("rejects a QQ candidate when its details omit the required interval", async
           status: 200,
           body: {
             code: 200,
-            list: [{ name: "晴天", singer: "周杰伦", duration: 269, mid: "qq-missing-interval" }],
+            list: [{ name: "晴天", singer: "周杰伦", interval: "04:29", duration: 269, mid: "qq-missing-interval" }],
           },
         };
       }
@@ -447,6 +447,60 @@ test("preserves a provider error when the cross-platform budget is exhausted", a
     (error) =>
       error.code === "CHKSZ_HTTP_503" &&
       error.message.includes("provider temporarily unavailable"),
+  );
+});
+
+test("preserves an earlier provider error when a later probe hits the budget", async () => {
+  const qqCandidates = Array.from({ length: 3 }, (_, index) => ({
+    name: "晴天",
+    singer: "周杰伦",
+    mid: index === 0 ? "qq-provider-error" : `qq-budget-${index}`,
+  }));
+  const { handlers, requests } = loadPlugin({
+    response: (url) => {
+      if (url.pathname === "/api/163_music") return UNAVAILABLE;
+      if (url.pathname === "/api/qq_music" && url.searchParams.has("msg")) {
+        return { status: 200, body: { code: 200, list: qqCandidates } };
+      }
+      if (url.pathname === "/api/qq_music") {
+        if (url.searchParams.get("mid") === "qq-provider-error") {
+          return { status: 503, body: { msg: "provider temporarily unavailable" } };
+        }
+        return UNAVAILABLE;
+      }
+      return { status: 200, body: { code: 200, list: [] } };
+    },
+  });
+
+  await assert.rejects(
+    handlers.musicUrl({ source: "wy", quality: "hi-res", musicInfo: JAY_TRACK }),
+    (error) =>
+      error.code === "CHKSZ_HTTP_503" &&
+      error.message.includes("provider temporarily unavailable"),
+  );
+  assert.equal(requests.slice(5).length, 8);
+});
+
+test("stops cross-platform fallback when the host cancels a request", async () => {
+  const { handlers, requests } = loadPlugin({
+    response: (url) => {
+      if (url.pathname === "/api/163_music") return UNAVAILABLE;
+      if (url.pathname === "/api/qq_music") {
+        const error = new Error("request canceled by SPlayer");
+        error.code = "PLUGIN_CANCELLED";
+        throw error;
+      }
+      return KUGOU_SEARCH_HIT;
+    },
+  });
+
+  await assert.rejects(
+    handlers.musicUrl({ source: "wy", quality: "lq", musicInfo: JAY_TRACK }),
+    (error) => error.code === "PLUGIN_CANCELLED",
+  );
+  assert.deepEqual(
+    requests.map((request) => new URL(request.url).pathname),
+    ["/api/163_music", "/api/qq_music"],
   );
 });
 

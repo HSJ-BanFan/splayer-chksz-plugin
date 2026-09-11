@@ -7,7 +7,7 @@
  * @homepage    https://github.com/HSJ-BanFan/splayer-chksz-plugin
  * @type        source
  * @grant       network
- * @apiLevel    1
+ * @apiLevel    2
  * @updateUrl   https://raw.githubusercontent.com/HSJ-BanFan/splayer-chksz-plugin/main/dist/chksz.splayer-source.js
  * @changelog   网易云无版权歌曲自动改用 QQ 音乐 / 酷狗播放\nQQ 音乐与酷狗同样支持音质降级
  */
@@ -302,6 +302,11 @@ const createResolutionCore = () => {
       String(error?.code),
     ) || error?.name === "TimeoutError";
 
+  const isHostCancellationError = (error) =>
+    ["PLUGIN_CANCELLED", "PLUGIN_ABORTED", "ABORT_ERR", "ERR_ABORTED"].includes(
+      String(error?.code),
+    ) || error?.name === "AbortError";
+
   const isOperationalError = (error) =>
     error?.code === NETWORK_ERROR || isRequestTimeoutError(error);
 
@@ -387,6 +392,16 @@ const createResolutionCore = () => {
     try {
       response = await requestWithTimeout(requestUrl, requestOptions, timeoutCode);
     } catch (error) {
+      if (isHostCancellationError(error)) {
+        const code =
+          typeof error?.code === "string" && error.code
+            ? error.code
+            : "PLUGIN_CANCELLED";
+        throw pluginError(
+          code,
+          redactSensitiveData(error?.message ?? "SPlayer 已取消请求。"),
+        );
+      }
       if (
         isRequestTimeoutError(error) ||
         isResolutionTimeoutError(error) ||
@@ -670,15 +685,16 @@ const createResolutionCore = () => {
               id,
               requestContext,
             );
+            const details = extractTrackDetails(resolution.body);
             const resolvedCandidate = {
               ...candidate,
-              ...extractTrackDetails(resolution.body),
+              ...details,
             };
             const requireDuration = parseDurationSeconds(track.interval) > 0;
             if (
               targetSource === "tx" &&
               requireDuration &&
-              parseDurationSeconds(resolvedCandidate.interval) <= 0
+              parseDurationSeconds(details.interval) <= 0
             ) {
               splayer.log.warn(
                 `${targetPolicy.name} 候选（${id}）详情缺少有效时长，跳过《${track.name}》。`,
@@ -697,8 +713,12 @@ const createResolutionCore = () => {
             );
             return resolution.result;
           } catch (error) {
+            if (isHostCancellationError(error)) throw error;
             if (isResolutionTimeoutError(error)) throw error;
-            if (isCrossPlatformLimitError(error)) throw error;
+            if (isCrossPlatformLimitError(error)) {
+              if (firstRecoverableError) throw firstRecoverableError;
+              throw error;
+            }
             if (isAccountError(error)) throw error;
             rememberRecoverableError(error);
             splayer.log.warn(
@@ -707,8 +727,12 @@ const createResolutionCore = () => {
           }
         }
       } catch (error) {
+        if (isHostCancellationError(error)) throw error;
         if (isResolutionTimeoutError(error)) throw error;
-        if (isCrossPlatformLimitError(error)) throw error;
+        if (isCrossPlatformLimitError(error)) {
+          if (firstRecoverableError) throw firstRecoverableError;
+          throw error;
+        }
         if (isAccountError(error)) throw error;
         rememberRecoverableError(error);
         splayer.log.warn(

@@ -84,6 +84,7 @@ test("contains publishable plugin metadata and network permission", () => {
   assert.match(pluginSource, /@id\s+chksz\.splayer-source/);
   assert.match(pluginSource, /@type\s+source/);
   assert.match(pluginSource, /@grant\s+network/);
+  assert.match(pluginSource, /@apiLevel\s+2/);
   assert.match(
     pluginSource,
     /@updateUrl\s+https:\/\/raw\.githubusercontent\.com\/HSJ-BanFan\/splayer-chksz-plugin/,

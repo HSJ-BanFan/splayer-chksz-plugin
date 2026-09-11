@@ -206,6 +206,25 @@ test("normalises host request timeout errors", async () => {
   );
 });
 
+test("preserves host cancellation errors", async () => {
+  const { handlers } = loadPlugin({
+    response: () => {
+      const error = new Error(
+        "cancelled https://api.chksz.com/api/qq_music?apikey=chksz_test_key",
+      );
+      error.code = "PLUGIN_CANCELLED";
+      throw error;
+    },
+  });
+
+  await assert.rejects(
+    handlers.musicUrl({ source: "tx", quality: "hq", musicInfo: { songmid: "qq-mid-1" } }),
+    (error) =>
+      error.code === "PLUGIN_CANCELLED" &&
+      !error.message.includes("chksz_test_key"),
+  );
+});
+
 test("classifies network failures without exposing the API key", async () => {
   const { handlers, requests } = loadPlugin({
     response: () => {
