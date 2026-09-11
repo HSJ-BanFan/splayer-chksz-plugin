@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { loadPlugin } from "./plugin-host.js";
+import { loadPlugin, pluginSource } from "./plugin-host.js";
 
 test("resolution core exposes a narrow playback resolver and normalizes nested URL expiry", async () => {
   const { resolutionCore } = loadPlugin({
@@ -166,6 +166,75 @@ test("passes a shared end-to-end timeout budget to music URL requests", async ()
 
   assert.ok(requests[0].options.timeout > 0);
   assert.ok(requests[0].options.timeout <= 18_000);
+});
+
+test("enforces the request timeout even when the host ignores its timeout option", async () => {
+  const sourceText = pluginSource.replace(
+    "const RESOLUTION_TIME_BUDGET = 18_000;",
+    "const RESOLUTION_TIME_BUDGET = 20;",
+  );
+  const { handlers } = loadPlugin({
+    sourceText,
+    response: async () => {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      return { status: 200, body: { code: 200, url: "https://cdn.example.test/song.flac" } };
+    },
+  });
+
+  await assert.rejects(
+    handlers.musicUrl({
+      source: "tx",
+      quality: "hi-res",
+      musicInfo: { songmid: "qq-mid-1" },
+    }),
+    (error) => error.code === "CHKSZ_REQUEST_TIMEOUT",
+  );
+});
+
+test("classifies network failures without exposing the API key", async () => {
+  const { handlers, requests } = loadPlugin({
+    response: () => {
+      throw new Error(
+        "socket failed for https://api.chksz.com/api/qq_music?mid=qq-mid-1&apikey=chksz_test_key",
+      );
+    },
+  });
+
+  await assert.rejects(
+    handlers.musicUrl({ source: "tx", quality: "hq", musicInfo: { songmid: "qq-mid-1" } }),
+    (error) =>
+      error.code === "CHKSZ_NETWORK_ERROR" &&
+      !error.message.includes("chksz_test_key") &&
+      error.message.includes("[REDACTED]"),
+  );
+  assert.equal(requests.length, 1);
+});
+
+test("redacts API keys from cross-platform network warnings", async () => {
+  const unavailable = {
+    status: 404,
+    body: { msg: "Music URL not found, song may be unavailable at this quality level" },
+  };
+  const { handlers, logs } = loadPlugin({
+    response: (url) => {
+      if (url.pathname === "/api/163_music") return unavailable;
+      throw new Error(
+        `socket failed for ${url.toString()} with apikey=chksz_test_key`,
+      );
+    },
+  });
+
+  await assert.rejects(
+    handlers.musicUrl({
+      source: "wy",
+      quality: "lq",
+      musicInfo: { id: "wy-id-1", name: "晴天", singer: "周杰伦", interval: "04:29" },
+    }),
+    (error) => error.code === "CHKSZ_TRACK_UNAVAILABLE",
+  );
+  assert.ok(
+    logs.every((entry) => !entry.args.join(" ").includes("chksz_test_key")),
+  );
 });
 
 test("does not retry 404 responses without the complete quality-unavailable message", async () => {

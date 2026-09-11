@@ -93,7 +93,7 @@ SPlayer-Next 先用内置官方接口解析播放地址，只有官方接口拿�
 
 ### 网易云无版权歌曲
 
-网易云对无版权歌曲在所有音质都会返回 `404：Music URL not found, song may be unavailable at this quality level`。插件在把 `hi-res → lossless → hq → sq → lq` 全部试完后，会依次：
+网易云对无版权歌曲在所有音质都会返回 `404：Music URL not found, song may be unavailable at this quality level`。插件会从当前请求的音质开始向下尝试；请求 `hi-res` 时，原生参数会按 `jymaster/master → hires → lossless/flac → 320k/exhigh → 128k/standard` 逐档探测，然后会依次：
 
 1. 用 `歌名 + 第一位歌手` 在 ChKSz 的 QQ 音乐点歌接口搜索；
 2. 在结果中挑选歌名相同、歌手有交集、时长相差不超过 20 秒的候选；
@@ -113,6 +113,8 @@ SPlayer-Next 先用内置官方接口解析播放地址，只有官方接口拿�
 - `403`：访问被禁止；
 - `429`：超过速率限制，并显示 `Retry-After`；
 - `503`：服务暂不可用。
+
+网络异常会转换为 `CHKSZ_NETWORK_ERROR`，请求超时会转换为 `CHKSZ_REQUEST_TIMEOUT` 或 `CHKSZ_RESOLUTION_TIMEOUT`；错误和日志会隐藏 API Key。
 
 插件不会对 `401`、`402`、`403`、`429` 无限重试；`429` 也不会在插件内部自动等待重试。三个平台仅对明确表示音质不可用的 `404` 尝试较低音质，逻辑降级顺序为 `hi-res` → `lossless` → `hq` → `sq` → `lq`；由于 ChKSz 将 `hq` 和 `sq` 映射到同一个原生音质（网易云 `exhigh`，QQ 音乐和酷狗 `320k`），相同的 API 音质不会重复请求。跨平台匹配过程中遇到 `401`、`402`、`403`、`429` 会立即停止并原样抛出；其他匹配失败只记录警告并继续尝试下一个平台。
 

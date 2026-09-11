@@ -25,6 +25,8 @@ const CROSS_PLATFORM_TIME_BUDGET = 10_000;
 const CROSS_PLATFORM_LIMIT_ERROR = "CHKSZ_CROSS_PLATFORM_LIMIT";
 const RESOLUTION_TIME_BUDGET = 18_000;
 const RESOLUTION_TIMEOUT_ERROR = "CHKSZ_RESOLUTION_TIMEOUT";
+const REQUEST_TIMEOUT_ERROR = "CHKSZ_REQUEST_TIMEOUT";
+const NETWORK_ERROR = "CHKSZ_NETWORK_ERROR";
 
 const QUALITY_NAMES = ["lq", "sq", "hq", "lossless", "hi-res"];
 // Logical downgrade ladder shared by every provider: hi-res → lossless → hq → sq → lq.
@@ -231,6 +233,11 @@ const createResolutionCore = () => {
     return "";
   };
 
+  const redactSensitiveData = (value) =>
+    String(value ?? "")
+      .replace(/([?&]apikey=)[^&\s]+/gi, "$1[REDACTED]")
+      .replace(/chksz_[A-Za-z0-9._~-]+/gi, "chksz_[REDACTED]");
+
   const getHeader = (headers, name) => {
     if (!isRecord(headers)) return "";
     const wanted = name.toLowerCase();
@@ -243,7 +250,7 @@ const createResolutionCore = () => {
 
   const throwHttpError = (response) => {
     const status = Number(response?.status) || 0;
-    const bodyMessage = getBodyMessage(response?.body);
+    const bodyMessage = redactSensitiveData(getBodyMessage(response?.body));
     const parts = [`ChKSz 请求失败（HTTP ${status}）`];
     if (bodyMessage) parts.push(bodyMessage);
 
@@ -260,7 +267,7 @@ const createResolutionCore = () => {
     const apiCode = Number(body?.code);
     if (!Number.isInteger(apiCode) || apiCode === 200) return;
 
-    const bodyMessage = getBodyMessage(body);
+    const bodyMessage = redactSensitiveData(getBodyMessage(body));
     const isHttpStatus = apiCode >= 400 && apiCode <= 599;
     const prefix = isHttpStatus
       ? `ChKSz 请求失败（HTTP ${apiCode}）`
@@ -285,9 +292,34 @@ const createResolutionCore = () => {
   const isResolutionTimeoutError = (error) =>
     error?.code === RESOLUTION_TIMEOUT_ERROR;
 
+  const isRequestTimeoutError = (error) =>
+    error?.code === REQUEST_TIMEOUT_ERROR;
+
   const isCrossPlatformEnabled = () => {
     const value = splayer.getSetting(CROSS_PLATFORM_SETTING);
     return value === undefined || value === null || value === "" || value === true;
+  };
+
+  const requestWithTimeout = async (url, options) => {
+    const timeout = Number(options?.timeout) > 0 ? Number(options.timeout) : REQUEST_TIMEOUT;
+    let timer;
+    try {
+      return await Promise.race([
+        Promise.resolve().then(() => splayer.request(url, options)),
+        new Promise((_, reject) => {
+          timer = setTimeout(() => {
+            reject(
+              pluginError(
+                REQUEST_TIMEOUT_ERROR,
+                `ChKSz 请求超过 ${timeout} 毫秒。`,
+              ),
+            );
+          }, timeout);
+        }),
+      ]);
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+    }
   };
 
   const requestJson = async (endpoint, params, { budget, deadline } = {}) => {
@@ -317,11 +349,22 @@ const createResolutionCore = () => {
       timeout = Math.max(1, Math.min(timeout, remainingResolutionTime));
     }
 
-    const response = await splayer.request(buildApiUrl(endpoint, params), {
+    const requestUrl = buildApiUrl(endpoint, params);
+    const requestOptions = {
       method: "GET",
       responseType: "json",
       timeout,
-    });
+    };
+    let response;
+    try {
+      response = await requestWithTimeout(requestUrl, requestOptions);
+    } catch (error) {
+      if (isRequestTimeoutError(error)) throw error;
+      throw pluginError(
+        NETWORK_ERROR,
+        `ChKSz 网络请求失败：${redactSensitiveData(error?.message ?? error)}`,
+      );
+    }
 
     if (
       !response ||
