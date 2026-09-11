@@ -183,6 +183,76 @@ test("validates QQ candidate duration from the resolved track details", async ()
   );
 });
 
+test("bounds cross-platform candidate probes and API requests", async () => {
+  const qqCandidates = Array.from({ length: 10 }, (_, index) => ({
+    n: index + 1,
+    name: "晴天",
+    singer: "周杰伦",
+    mid: `qq-${index + 1}`,
+  }));
+  const kugouCandidates = Array.from({ length: 10 }, (_, index) => ({
+    n: index + 1,
+    name: "晴天",
+    singer: "周杰伦",
+    duration: 269,
+    id: `kg-${index + 1}`,
+  }));
+  const { handlers, requests } = loadPlugin({
+    response: (url) => {
+      if (url.pathname === "/api/163_music") return UNAVAILABLE;
+      if (url.pathname === "/api/qq_music" && url.searchParams.has("msg")) {
+        return { status: 200, body: { code: 200, list: qqCandidates } };
+      }
+      if (url.pathname === "/api/qq_music") {
+        return {
+          status: 200,
+          body: {
+            code: 200,
+            name: "晴天",
+            singer: "周杰伦",
+            interval: "02:00",
+            url: "https://qq.example.test/wrong-duration.mp3",
+          },
+        };
+      }
+      if (url.pathname === "/api/kugou_music" && url.searchParams.has("msg")) {
+        return { status: 200, body: { code: 200, list: kugouCandidates } };
+      }
+      return {
+        status: 200,
+        body: {
+          code: 200,
+          name: "晴天",
+          singer: "周杰伦",
+          interval: "02:00",
+          url: "https://kg.example.test/wrong-duration.mp3",
+        },
+      };
+    },
+  });
+
+  await assert.rejects(
+    handlers.musicUrl({ source: "wy", quality: "hq", musicInfo: JAY_TRACK }),
+    (error) => error.code === "CHKSZ_TRACK_UNAVAILABLE",
+  );
+
+  const fallbackRequests = requests.slice(2);
+  assert.equal(fallbackRequests.length, 8);
+  assert.deepEqual(
+    fallbackRequests.map((request) => new URL(request.url).pathname),
+    [
+      "/api/qq_music",
+      "/api/qq_music",
+      "/api/qq_music",
+      "/api/qq_music",
+      "/api/kugou_music",
+      "/api/kugou_music",
+      "/api/kugou_music",
+      "/api/kugou_music",
+    ],
+  );
+});
+
 test("prefers an exact title over a live or remix variant listed first", async () => {
   const { handlers, requests } = loadPlugin({
     response: (url) => {
