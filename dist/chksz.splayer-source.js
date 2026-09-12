@@ -1,7 +1,7 @@
 /**
  * @name        ChKSz 音源
  * @id          chksz.splayer-source
- * @version     0.4.0
+ * @version     0.5.0
  * @description 使用 ChKSz API 解析网易云、QQ 音乐和酷狗播放地址
  * @author      HSJ-BanFan
  * @homepage    https://github.com/HSJ-BanFan/splayer-chksz-plugin
@@ -9,7 +9,7 @@
  * @grant       network
  * @apiLevel    2
  * @updateUrl   https://raw.githubusercontent.com/HSJ-BanFan/splayer-chksz-plugin/main/dist/chksz.splayer-source.js
- * @changelog   429 限流冷却与上游通道熔断，区分"服务端不可用"和"未匹配"；标题版本标记不再阻断跨平台匹配
+ * @changelog   429 限流冷却与上游通道熔断；上报实际交付音质；默认可播放优先，母带档降为兜底
  */
 
 const API_BASE_URL = "https://api.chksz.com";
@@ -42,6 +42,9 @@ const CHANNEL_COOLDOWN = 2 * 60_000;
 const TRACK_UNAVAILABLE_TTL = CACHE_TTL;
 
 const QUALITY_NAMES = ["lq", "sq", "hq", "lossless", "hi-res"];
+// 母带/音效档：实测网易云这些档位交付 192kHz/24-bit FLAC，单曲 46–150MB（一首 153 秒
+// 的歌 103MB），部分播放器无法起播。"可播放优先"把它们排到阶梯最后。
+const MASTER_TIER_LEVELS = new Set(["jymaster", "jyeffect", "sky"]);
 // ChKSz 原生档位 → SPlayer 逻辑音质。多对一是不可避免的：hq/sq 共用一个原生档位，
 // hi-res 对应 jymaster/hires/sky/jyeffect 四个不同的事实，所以只用于"实际交付了什么"。
 const NATIVE_QUALITY_LEVELS = {
@@ -242,6 +245,7 @@ const createResolutionCore = () => {
       economyMode: enabledSetting("economyMode", false),
       metadataFallback: enabledSetting("metadataFallback", true),
       crossPlatformFallback: enabledSetting(CROSS_PLATFORM_SETTING, true),
+      playableFirst: enabledSetting("playableFirst", true),
     };
     const signature = JSON.stringify([apiKey, config]);
     if (session?.signature !== signature) {
@@ -766,14 +770,15 @@ const createResolutionCore = () => {
     return result;
   };
 
-  const selectQualityCandidates = (policy, requestedQuality, economyMode) => {
+  const selectQualityCandidates = (policy, requestedQuality, config = {}) => {
+    const { economyMode = false, playableFirst = true } = config;
     const logicalQualities = economyMode ? [requestedQuality, "lq"] : policy.playback.qualityFallbacks?.[
       requestedQuality
     ] ?? [requestedQuality];
     const attemptedNativeQualities = new Set();
     const { qualityValues } = policy.playback;
 
-    return logicalQualities
+    const candidates = logicalQualities
       .flatMap((candidateQuality) =>
         [
           qualityValues[candidateQuality],
@@ -785,6 +790,14 @@ const createResolutionCore = () => {
         attemptedNativeQualities.add(nativeQuality);
         return true;
       });
+
+    // 省配额模式本身就是用户显式选的取舍，不改它的顺序。
+    if (!playableFirst || economyMode) return candidates;
+
+    return [
+      ...candidates.filter(({ nativeQuality }) => !MASTER_TIER_LEVELS.has(nativeQuality)),
+      ...candidates.filter(({ nativeQuality }) => MASTER_TIER_LEVELS.has(nativeQuality)),
+    ];
   };
 
   const resolveOnPlatform = async (source, quality, id, requestContext = {}) => {
@@ -794,7 +807,7 @@ const createResolutionCore = () => {
     if (remembered) throw remembered;
 
     const economyMode = state?.config.economyMode;
-    const qualityCandidates = selectQualityCandidates(policy, requestedQuality, economyMode);
+    const qualityCandidates = selectQualityCandidates(policy, requestedQuality, state?.config);
     let body;
     let resolvedQuality = requestedQuality;
 
@@ -1251,6 +1264,14 @@ runtimeAdapter.register({
       type: "switch",
       label: "智能请求复用",
       description: "合并相同播放请求；缓存明确有效的地址与搜索结果，短暂跳过不可用音质。仅保存在内存，切换配置会清空。",
+      default: true,
+    },
+    {
+      key: "playableFirst",
+      type: "switch",
+      label: "可播放优先（母带档留到最后）",
+      description:
+        "请求 hi-res 时先取 hires、无损等通用档位，把网易云的母带/音效档（jymaster 等）排到最后。实测这些档位单曲可达 46–150MB、192kHz/24-bit，在部分播放器上无法起播；想优先母带时可关闭。",
       default: true,
     },
     {

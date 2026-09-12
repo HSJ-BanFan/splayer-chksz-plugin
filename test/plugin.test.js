@@ -326,7 +326,8 @@ test("falls through the supported NetEase quality ladder and reports the effecti
     musicInfo: { id: "123" },
   });
 
-  assert.deepEqual(requestedLevels, ["jymaster", "hires", "lossless", "exhigh", "standard"]);
+  // 可播放优先：hires 排在最前，jymaster 母带档留到最后，standard 先成功就不再往下探。
+  assert.deepEqual(requestedLevels, ["hires", "lossless", "exhigh", "standard"]);
   assert.equal(result.quality, "lq");
 });
 
@@ -400,6 +401,71 @@ test("keeps the requested logical quality when the response carries no native le
   assert.equal(result.quality, "lossless");
 });
 
+const MASTER_TRACK_INFO = { id: "22831636", name: "My jealousy", singer: "DJMAX" };
+const masterTierSong = () => ({ source: "wy", quality: "hi-res", musicInfo: MASTER_TRACK_INFO });
+
+test("prefers a lightweight tier over the master tier so the result stays playable", async () => {
+  const requested = [];
+  const { handlers } = loadPlugin({
+    response: (url) => {
+      requested.push(url.searchParams.get("level"));
+      return {
+        status: 200,
+        body: { code: 200, data: { url: "https://cdn.example.test/song.flac", level: "lossless", br: 962359 } },
+      };
+    },
+  });
+
+  const result = await handlers.musicUrl(masterTierSong());
+
+  assert.deepEqual(requested, ["hires"], "默认不再优先请求母带档");
+  assert.equal(result.quality, "lossless");
+});
+
+test("master-first is still available for listeners who want it", async () => {
+  const requested = [];
+  const { handlers } = loadPlugin({
+    settings: { playableFirst: false },
+    response: (url) => {
+      requested.push(url.searchParams.get("level"));
+      return {
+        status: 200,
+        body: { code: 200, data: { url: "https://cdn.example.test/master.flac", level: "jymaster", br: 5667204 } },
+      };
+    },
+  });
+
+  const result = await handlers.musicUrl(masterTierSong());
+
+  assert.deepEqual(requested, ["jymaster"]);
+  assert.equal(result.quality, "hi-res");
+});
+
+test("still falls back to the master tier when every lighter tier is unavailable", async () => {
+  const requested = [];
+  const { handlers } = loadPlugin({
+    response: (url) => {
+      const level = url.searchParams.get("level");
+      requested.push(level);
+      if (level === "jymaster") {
+        return {
+          status: 200,
+          body: { code: 200, data: { url: "https://cdn.example.test/master.flac", level: "jymaster", br: 5667204 } },
+        };
+      }
+      return {
+        status: 404,
+        body: { msg: "Music URL not found, song may be unavailable at this quality level" },
+      };
+    },
+  });
+
+  const result = await handlers.musicUrl(masterTierSong());
+
+  assert.deepEqual(requested, ["hires", "lossless", "exhigh", "standard", "jymaster"]);
+  assert.equal(result.quality, "hi-res");
+});
+
 test("maps QQ and Kugou IDs and native quality values", async () => {
   const { handlers, requests } = loadPlugin({
     response: (url) => ({ status: 200, body: { url: `https://cdn.example.test/${url.pathname}.mp3` } }),
@@ -427,7 +493,7 @@ test("maps QQ and Kugou IDs and native quality values", async () => {
   assert.equal(kugouUrl.searchParams.get("size"), "master");
 });
 
-test("maps SPlayer hi-res to each provider's top ChKSz quality", async () => {
+test("maps SPlayer hi-res to the playable tier first while keeping each provider's top quality available", async () => {
   const { handlers, requests } = loadPlugin({
     response: { status: 200, body: { url: "https://cdn.example.test/song.flac" } },
   });
@@ -448,13 +514,15 @@ test("maps SPlayer hi-res to each provider's top ChKSz quality", async () => {
     musicInfo: { id: "kg-id-1" },
   });
 
+  // 网易云的母带档默认降到阶梯最后，QQ / 酷狗保持各自的最高档；
+  // 母带档仍是兜底候选（见 "still falls back to the master tier"）。
   assert.deepEqual(
     requests.map((request) => {
       const url = new URL(request.url);
       return { path: url.pathname, quality: url.searchParams.get("level") ?? url.searchParams.get("size") };
     }),
     [
-      { path: "/api/163_music", quality: "jymaster" },
+      { path: "/api/163_music", quality: "hires" },
       { path: "/api/qq_music", quality: "master" },
       { path: "/api/kugou_music", quality: "master" },
     ],
@@ -482,7 +550,6 @@ test("tries each provider's native hires quality before falling to lossless", as
   await handlers.musicUrl({ source: "kg", quality: "hi-res", musicInfo: { id: "kg-id-1" } });
 
   assert.deepEqual(requestedQualities, [
-    "jymaster",
     "hires",
     "master",
     "hires",
