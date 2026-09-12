@@ -570,6 +570,72 @@ test("downgrades QQ Music and Kugou qualities on the same unavailable signal", a
   assert.equal(kugou.quality, "lossless");
 });
 
+/** NetEase track whose own title carries a version marker (issue #1 反馈的 22831636). */
+const VERSIONED_TRACK = {
+  id: "22831636",
+  songmid: "22831636",
+  songId: "22831636",
+  name: "My jealousy (Original ver.)",
+  singer: "DJMAX",
+  source: "wy",
+  interval: "02:33",
+};
+
+test("matches a versioned original against a clean candidate title", async () => {
+  const { handlers, requests } = loadPlugin({
+    response: (url) => {
+      if (url.pathname === "/api/163_music") return UNAVAILABLE;
+      if (url.searchParams.has("msg")) {
+        return {
+          status: 200,
+          body: { code: 200, list: [{ n: 1, name: "My jealousy", singer: "DJMAX", mid: "qq-my-jealousy" }] },
+        };
+      }
+      return {
+        status: 200,
+        body: {
+          code: 200,
+          name: "My jealousy",
+          singer: "DJMAX",
+          interval: "02:33",
+          url: "https://qq.example.test/my-jealousy.flac",
+        },
+      };
+    },
+  });
+
+  const result = await handlers.musicUrl({ source: "wy", quality: "lq", musicInfo: VERSIONED_TRACK });
+
+  assert.equal(describeRequest(requests[1]).params.msg, "My jealousy DJMAX");
+  assert.equal(result.url, "https://qq.example.test/my-jealousy.flac");
+  assert.equal(result.quality, "lq");
+});
+
+test("a relaxed title match still requires the artist and duration to agree", async () => {
+  for (const candidate of [
+    { name: "My jealousy", singer: "别的歌手", interval: "02:33", mid: "qq-other-artist" },
+    { name: "My jealousy", singer: "DJMAX", interval: "01:00", mid: "qq-short-edit" },
+  ]) {
+    const { handlers } = loadPlugin({
+      response: (url) => {
+        if (url.pathname === "/api/163_music") return UNAVAILABLE;
+        if (url.searchParams.has("msg")) {
+          return { status: 200, body: { code: 200, list: [candidate] } };
+        }
+        if (url.pathname === "/api/qq_music") {
+          return { status: 200, body: { code: 200, ...candidate, url: "https://qq.example.test/wrong.flac" } };
+        }
+        return { status: 200, body: { code: 200, list: [] } };
+      },
+    });
+
+    await assert.rejects(
+      handlers.musicUrl({ source: "wy", quality: "lq", musicInfo: VERSIONED_TRACK }),
+      (error) => error.code === "CHKSZ_TRACK_UNAVAILABLE",
+    );
+  }
+});
+
 test("registers the cross-platform switch as an opt-out setting", () => {
   const { registration } = loadPlugin({ response: { status: 200, body: {} } });
   const setting = registration.settings.find((item) => item.key === "crossPlatformFallback");

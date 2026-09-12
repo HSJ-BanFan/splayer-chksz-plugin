@@ -1,7 +1,7 @@
 /**
  * @name        ChKSz 音源
  * @id          chksz.splayer-source
- * @version     0.3.0
+ * @version     0.4.0
  * @description 使用 ChKSz API 解析网易云、QQ 音乐和酷狗播放地址
  * @author      HSJ-BanFan
  * @homepage    https://github.com/HSJ-BanFan/splayer-chksz-plugin
@@ -9,7 +9,7 @@
  * @grant       network
  * @apiLevel    2
  * @updateUrl   https://raw.githubusercontent.com/HSJ-BanFan/splayer-chksz-plugin/main/dist/chksz.splayer-source.js
- * @changelog   智能缓存与并发请求复用减少重复调用\n新增省配额模式及歌词封面额外请求开关
+ * @changelog   429 限流冷却与上游通道熔断，区分"服务端不可用"和"未匹配"；标题版本标记不再阻断跨平台匹配
  */
 
 const API_BASE_URL = "https://api.chksz.com";
@@ -23,6 +23,8 @@ const CROSS_PLATFORM_MAX_CANDIDATES = 3;
 const CROSS_PLATFORM_REQUEST_BUDGET = 8;
 const CROSS_PLATFORM_TIME_BUDGET = 10_000;
 const CROSS_PLATFORM_LIMIT_ERROR = "CHKSZ_CROSS_PLATFORM_LIMIT";
+const CROSS_PLATFORM_UNAVAILABLE_ERROR = "CHKSZ_CROSS_PLATFORM_UNAVAILABLE";
+const RATE_LIMIT_ERROR = "CHKSZ_RATE_LIMITED";
 const RESOLUTION_TIME_BUDGET = 18_000;
 const RESOLUTION_TIMEOUT_ERROR = "CHKSZ_RESOLUTION_TIMEOUT";
 const REQUEST_TIMEOUT_ERROR = "CHKSZ_REQUEST_TIMEOUT";
@@ -31,6 +33,13 @@ const CACHE_LIMIT = 128;
 const CACHE_TTL = 5 * 60_000;
 const UNAVAILABLE_TTL = 60_000;
 const URL_EXPIRY_MARGIN = 30_000;
+// ChKSz 限流为 20 RPM；命中 429 后按 Retry-After 进入冷却，避免把额度继续打空。
+const RATE_LIMIT_COOLDOWN = 60_000;
+const MAX_RATE_LIMIT_COOLDOWN = 15 * 60_000;
+// 502/503/504 是 ChKSz 上游故障（实测酷狗会持续返回并触发服务端熔断），冷却期内不再探测该平台。
+const CHANNEL_COOLDOWN = 2 * 60_000;
+// 整条音质阶梯都不可用说明是版权问题而非瞬时抖动，短期内同曲直接跳跨平台，省下阶梯请求。
+const TRACK_UNAVAILABLE_TTL = CACHE_TTL;
 
 const QUALITY_NAMES = ["lq", "sq", "hq", "lossless", "hi-res"];
 // Logical downgrade ladder shared by every provider: hi-res → lossless → hq → sq → lq.
@@ -151,6 +160,24 @@ const getMusicId = (musicInfo) => {
 const textOrEmpty = (value) => (typeof value === "string" ? value.trim() : "");
 
 const ARTIST_SEPARATOR = /[/、,，&]/;
+const TITLE_BRACKET_PATTERN = /[（(\[【][^）)\]】]{0,40}[）)\]】]/g;
+const TITLE_TRAILING_VARIANT_PATTERN =
+  /[\s\-–—_]+(?:live|remaster(?:ed)?|version|ver\.?|instrumental|inst\.?|off\s*vocal|伴奏|现场|演唱会).*$/i;
+
+/**
+ * 去掉标题里的版本标记（括号段、"- Live" 这类后缀）。
+ * 用于跨平台搜索关键词，以及"原曲自带版本标记、候选是干净标题"时的宽松匹配。
+ */
+const stripTitleVariant = (value) => {
+  const original = textOrEmpty(value);
+  const stripped = original
+    .replace(TITLE_BRACKET_PATTERN, " ")
+    .replace(TITLE_TRAILING_VARIANT_PATTERN, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  // 整个标题都是版本标记时（例如 "(Live)"）退回原值，避免把所有候选都视为同一首。
+  return stripped || original;
+};
 
 /** Metadata SPlayer attaches to musicInfo; only used for cross-platform matching. */
 const getTrackDescriptor = (musicInfo) => ({
@@ -207,6 +234,8 @@ const createResolutionCore = () => {
         apiKey, config, signature,
         responses: new Map(), metadata: new Map(), actions: new Map(),
         pending: new Map(), actionPending: new Map(),
+        channelCooldowns: new Map(), unavailableTracks: new Map(),
+        rateLimitUntil: 0,
       };
     }
     return session;
@@ -241,6 +270,76 @@ const createResolutionCore = () => {
     } finally {
       if (map.get(key) === pending) map.delete(key);
     }
+  };
+
+  const remainingSeconds = (until) =>
+    Math.max(0, Math.ceil((Number(until) - Date.now()) / 1000));
+
+  const assertRateLimit = (state) => {
+    const remaining = remainingSeconds(state.rateLimitUntil);
+    if (remaining > 0) {
+      throw pluginError(
+        RATE_LIMIT_ERROR,
+        `ChKSz 请求受限：请在 ${remaining} 秒后再试。`,
+      );
+    }
+  };
+
+  const noteRateLimit = (state, error) => {
+    if (Number(error?.status) !== 429) return;
+    const retryAfter = Number(error?.retryAfterSeconds);
+    const seconds =
+      Number.isFinite(retryAfter) && retryAfter > 0
+        ? retryAfter
+        : RATE_LIMIT_COOLDOWN / 1000;
+    const until = Date.now() + Math.min(seconds * 1000, MAX_RATE_LIMIT_COOLDOWN);
+    state.rateLimitUntil = Math.max(state.rateLimitUntil, until);
+  };
+
+  // 502/503/504 由 ChKSz 的上游选曲通道返回；此时继续探测只会白打请求。
+  const isUpstreamUnavailableError = (error) =>
+    [502, 503, 504].includes(Number(error?.status));
+
+  const coolingDownChannel = (state, source) => {
+    const until = state.channelCooldowns.get(source);
+    if (!until) return 0;
+    const remaining = remainingSeconds(until);
+    if (remaining <= 0) {
+      state.channelCooldowns.delete(source);
+      return 0;
+    }
+    return remaining;
+  };
+
+  const noteChannelFailure = (state, source, error) => {
+    if (!isUpstreamUnavailableError(error)) return;
+    state.channelCooldowns.set(source, Date.now() + CHANNEL_COOLDOWN);
+  };
+
+  const trackUnavailableKey = (source, id) => `${source}:${String(id)}`;
+
+  const readUnavailableTrack = (state, source, id) => {
+    const key = trackUnavailableKey(source, id);
+    const entry = state.unavailableTracks.get(key);
+    if (!entry) return undefined;
+    if (entry.until <= Date.now()) {
+      state.unavailableTracks.delete(key);
+      return undefined;
+    }
+    return entry.error;
+  };
+
+  const rememberUnavailableTrack = (state, source, id, error) => {
+    if (!state.config.smartCache) return;
+    const key = trackUnavailableKey(source, id);
+    state.unavailableTracks.delete(key);
+    while (state.unavailableTracks.size >= CACHE_LIMIT) {
+      state.unavailableTracks.delete(state.unavailableTracks.keys().next().value);
+    }
+    state.unavailableTracks.set(key, {
+      error,
+      until: Date.now() + TRACK_UNAVAILABLE_TTL,
+    });
   };
 
   const getApiKey = () => {
@@ -315,15 +414,20 @@ const createResolutionCore = () => {
     const parts = [`ChKSz 请求失败（HTTP ${status}）`];
     if (bodyMessage) parts.push(bodyMessage);
 
-    if (status === 429) {
-      const retryAfter = getHeader(response?.headers, "retry-after");
-      if (retryAfter) {
-        parts.push(`请在 ${redactSensitiveData(retryAfter)} 秒后再试`);
-      }
+    const retryAfter = status === 429 ? getHeader(response?.headers, "retry-after") : "";
+    if (retryAfter) {
+      parts.push(`请在 ${redactSensitiveData(retryAfter)} 秒后再试`);
     }
 
     const code = status > 0 ? `CHKSZ_HTTP_${status}` : "CHKSZ_HTTP_ERROR";
-    throw pluginError(code, parts.join("："));
+    const error = pluginError(code, parts.join("："));
+    // 结构化状态供限流/通道冷却判定，避免从文案反推。
+    error.status = status;
+    const retryAfterSeconds = Number(retryAfter);
+    if (Number.isFinite(retryAfterSeconds) && retryAfterSeconds > 0) {
+      error.retryAfterSeconds = retryAfterSeconds;
+    }
+    throw error;
   };
 
   const throwApiError = (body) => {
@@ -347,7 +451,7 @@ const createResolutionCore = () => {
 
   // Key, quota, ban and rate-limit failures affect every request; stop probing after them.
   const isAccountError = (error) =>
-    /^CHKSZ_(CONFIG_|HTTP_(401|402|403|429)$)/.test(String(error?.code));
+    /^CHKSZ_(CONFIG_|RATE_LIMITED$|HTTP_(401|402|403|429)$)/.test(String(error?.code));
 
   const isCrossPlatformLimitError = (error) =>
     error?.code === CROSS_PLATFORM_LIMIT_ERROR;
@@ -547,8 +651,11 @@ const createResolutionCore = () => {
     }
     let body;
     try {
+      // 缓存命中不算请求，因此限流闸门放在缓存之后、真正发请求之前。
+      assertRateLimit(state);
       body = await performRequestJson(endpoint, params, { ...context, state });
     } catch (error) {
+      noteRateLimit(state, error);
       if (state.config.smartCache && isUnavailableQualityError(error)) {
         writeCache(state.responses, key, { error }, Date.now() + UNAVAILABLE_TTL);
       }
@@ -652,7 +759,12 @@ const createResolutionCore = () => {
 
   const resolveOnPlatform = async (source, quality, id, requestContext = {}) => {
     const { policy, requestedQuality } = buildTrackParams(source, id, quality);
-    const qualityCandidates = selectQualityCandidates(policy, requestedQuality, requestContext.state?.config.economyMode);
+    const state = requestContext.state;
+    const remembered = state ? readUnavailableTrack(state, source, id) : undefined;
+    if (remembered) throw remembered;
+
+    const economyMode = state?.config.economyMode;
+    const qualityCandidates = selectQualityCandidates(policy, requestedQuality, economyMode);
     let body;
     let resolvedQuality = requestedQuality;
 
@@ -665,6 +777,10 @@ const createResolutionCore = () => {
         break;
       } catch (error) {
         const hasFallback = index < qualityCandidates.length - 1;
+        // 完整阶梯全部不可用说明是版权问题，而非某一档抖动；省配额模式的阶梯不完整，不能据此下结论。
+        if (!hasFallback && state && !economyMode && isUnavailableQualityError(error)) {
+          rememberUnavailableTrack(state, source, id, error);
+        }
         if (!hasFallback || !isUnavailableQualityError(error)) throw error;
       }
     }
@@ -696,12 +812,27 @@ const createResolutionCore = () => {
     return parseDurationSeconds(Number(text));
   };
 
-  /** 0 = different song, 2 = exact normalised title. */
+  /** 只有"原曲自带版本标记、候选是干净标题"时才允许宽松匹配。 */
+  const isVariantFallback = (wantedTitle, candidateTitle) => {
+    const wanted = textOrEmpty(wantedTitle);
+    const candidate = textOrEmpty(candidateTitle);
+    const wantedBase = stripTitleVariant(wanted);
+    const candidateBase = stripTitleVariant(candidate);
+    // 原曲本身没有版本标记，说明它就是规范版本，不接受别的版本顶替。
+    if (normaliseText(wantedBase) === normaliseText(wanted)) return false;
+    // 候选自己也带版本标记时必须走精确匹配，否则会拿另一个变体冒充。
+    if (normaliseText(candidateBase) !== normaliseText(candidate)) return false;
+    return exactlyEqual(normaliseText(wantedBase), normaliseText(candidateBase));
+  };
+
+  /** 0 = different song, 2 = exact normalised title, 1 = relaxed title match. */
   const matchScore = (track, candidate, { requireDuration = false } = {}) => {
     if (!isRecord(candidate)) return 0;
     const wantedName = normaliseText(track.name);
     const candidateName = normaliseText(candidate.name);
-    if (!exactlyEqual(wantedName, candidateName)) return 0;
+    const exact = exactlyEqual(wantedName, candidateName);
+    const relaxed = !exact && isVariantFallback(track.name, candidate.name);
+    if (!exact && !relaxed) return 0;
 
     const wantedArtists = splitArtists(track.singer);
     const candidateArtists = splitArtists(candidate.singer);
@@ -728,7 +859,7 @@ const createResolutionCore = () => {
       return 0;
     }
 
-    return wantedName === candidateName ? 2 : 1;
+    return exact ? 2 : 1;
   };
 
   const extractCandidates = (body) => {
@@ -755,7 +886,9 @@ const createResolutionCore = () => {
   const findMatchingTracks = async (source, track, requestContext = {}) => {
     const { search } = getSourcePolicy(source);
     const primaryArtist = track.singer.split(ARTIST_SEPARATOR)[0].trim();
-    const keyword = [track.name, primaryArtist].filter(Boolean).join(" ");
+    // 关键词用去掉版本标记的标题：把 "(Live)"、"My jealousy (Original ver.)" 这类后缀
+    // 直接丢给搜索接口会显著降低命中率。
+    const keyword = [stripTitleVariant(track.name), primaryArtist].filter(Boolean).join(" ");
     const body = await requestJson(
       search.endpoint,
       {
@@ -779,13 +912,15 @@ const createResolutionCore = () => {
       .map(({ candidate, id }) => ({ candidate, id }));
   };
 
-  const resolveAcrossPlatforms = async (policy, quality, track, deadline, state) => {
+  const resolveAcrossPlatforms = async (policy, quality, track, deadline, state, primaryError) => {
     const budget = {
       remaining: state.config.economyMode ? 4 : CROSS_PLATFORM_REQUEST_BUDGET,
       deadline: Math.min(deadline, Date.now() + CROSS_PLATFORM_TIME_BUDGET),
     };
     const requestContext = { budget, deadline, state };
+    const attempts = [];
     let firstRecoverableError;
+    let completedSearch = false;
 
     const rememberRecoverableError = (error) => {
       if (
@@ -798,8 +933,22 @@ const createResolutionCore = () => {
 
     for (const targetSource of policy.crossPlatform.sources) {
       const targetPolicy = getSourcePolicy(targetSource);
+      const cooldownSeconds = coolingDownChannel(state, targetSource);
+      if (cooldownSeconds > 0) {
+        attempts.push({ name: targetPolicy.name, outcome: "cooldown", cooldownSeconds });
+        splayer.log.warn(
+          `${targetPolicy.name} 上游故障冷却中，${cooldownSeconds} 秒内跳过《${track.name}》的跨平台匹配。`,
+        );
+        continue;
+      }
       try {
         const matches = await findMatchingTracks(targetSource, track, requestContext);
+        // 搜索本身跑通了才算"这首歌在该平台不存在"；搜索失败只能说明平台不可用。
+        completedSearch = true;
+        attempts.push({
+          name: targetPolicy.name,
+          outcome: matches.length ? "candidates" : "no-match",
+        });
         for (const { candidate, id } of matches) {
           try {
             const resolution = await resolveOnPlatform(
@@ -844,6 +993,7 @@ const createResolutionCore = () => {
             }
             if (isAccountError(error)) throw error;
             rememberRecoverableError(error);
+            noteChannelFailure(state, targetSource, error);
             splayer.log.warn(
               `${targetPolicy.name} 匹配《${track.name}》失败：${error?.message ?? error}`,
             );
@@ -858,10 +1008,28 @@ const createResolutionCore = () => {
         }
         if (isAccountError(error)) throw error;
         rememberRecoverableError(error);
+        noteChannelFailure(state, targetSource, error);
+        attempts.push({ name: targetPolicy.name, outcome: "error", error });
         splayer.log.warn(
           `${targetPolicy.name} 匹配《${track.name}》失败：${error?.message ?? error}`,
         );
       }
+    }
+
+    // 一个平台都没能跑完搜索：这是 ChKSz 上游故障，不能报成"没有这首歌"。
+    // 但本机网络/超时类错误本身已足够精确，保持原有的 NETWORK_ERROR 语义。
+    if (!completedSearch && attempts.length > 0 && !isOperationalError(firstRecoverableError)) {
+      const detail = attempts
+        .map(({ name, outcome, error, cooldownSeconds }) =>
+          outcome === "cooldown"
+            ? `${name}（${cooldownSeconds} 秒冷却中，未发起请求）`
+            : `${name}（${error?.message ?? "未完成搜索"}）`,
+        )
+        .join("；");
+      throw pluginError(
+        CROSS_PLATFORM_UNAVAILABLE_ERROR,
+        `${policy.name}无法提供《${track.name}》的播放地址（${primaryError?.message ?? "没有可用音质"}），且跨平台搜索未能完成：${detail}。以上是 ChKSz 服务端的返回状态，不代表歌曲不存在，请稍后重试或更换音源。`,
+      );
     }
 
     if (firstRecoverableError) throw firstRecoverableError;
@@ -891,7 +1059,7 @@ const createResolutionCore = () => {
         state.config.crossPlatformFallback;
       if (!canCrossSearch) throw error;
 
-      const fallback = await resolveAcrossPlatforms(policy, quality, descriptor, deadline, state);
+      const fallback = await resolveAcrossPlatforms(policy, quality, descriptor, deadline, state, error);
       if (fallback) return fallback;
 
       const platformNames = policy.crossPlatform.sources
