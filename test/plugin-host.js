@@ -13,12 +13,15 @@ export const loadPlugin = ({
   apiKey = "chksz_test_key",
   settings: settingOverrides = {},
   response,
+  probeResponse,
   now = () => Date.now(),
   sourceText = pluginSource,
 } = {}) => {
   const registration = {};
   const handlers = {};
   const requests = [];
+  const deliveryProbes = [];
+  const hostRequests = [];
   const logs = [];
   const settings = { apiKey, ...settingOverrides };
 
@@ -33,7 +36,22 @@ export const loadPlugin = ({
       return settings[key];
     },
     async request(url, options) {
-      requests.push({ url, options });
+      const entry = { url, options };
+      hostRequests.push(entry);
+      const isProbe = Boolean(options?.headers?.Range || options?.headers?.range);
+      // 交付体检是对 CDN 的前几个字节探测，不算 ChKSz API 调用；`requests` 只保留解析类请求，
+      // `deliveryProbes` 单独记账，`hostRequests` 是完整日志。
+      if (isProbe) {
+        deliveryProbes.push(entry);
+        // 默认把探测地址当作可访问；要模拟地址不可用就传 probeResponse。
+        if (probeResponse === undefined) {
+          return { status: 206, body: new Uint8Array([0x66, 0x4c, 0x61, 0x43]) };
+        }
+        return typeof probeResponse === "function"
+          ? probeResponse(new URL(url), options)
+          : probeResponse;
+      }
+      requests.push(entry);
       return typeof response === "function"
         ? response(new URL(url), options)
         : response;
@@ -67,6 +85,8 @@ export const loadPlugin = ({
     registration,
     handlers,
     requests,
+    deliveryProbes,
+    hostRequests,
     logs,
     setSetting(key, value) { settings[key] = value; },
     resolutionCore: context.__resolutionCore,

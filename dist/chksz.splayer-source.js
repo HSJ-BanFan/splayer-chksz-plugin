@@ -1,7 +1,7 @@
 /**
  * @name        ChKSz 音源
  * @id          chksz.splayer-source
- * @version     0.5.0
+ * @version     0.6.0
  * @description 使用 ChKSz API 解析网易云、QQ 音乐和酷狗播放地址
  * @author      HSJ-BanFan
  * @homepage    https://github.com/HSJ-BanFan/splayer-chksz-plugin
@@ -9,7 +9,7 @@
  * @grant       network
  * @apiLevel    2
  * @updateUrl   https://raw.githubusercontent.com/HSJ-BanFan/splayer-chksz-plugin/main/dist/chksz.splayer-source.js
- * @changelog   429 限流冷却与上游通道熔断；上报实际交付音质；默认可播放优先，母带档降为兜底
+ * @changelog   恢复母带优先（最佳音质）；返回地址前做交付体检，地址打不开自动降档
  */
 
 const API_BASE_URL = "https://api.chksz.com";
@@ -40,6 +40,23 @@ const MAX_RATE_LIMIT_COOLDOWN = 15 * 60_000;
 const CHANNEL_COOLDOWN = 2 * 60_000;
 // 整条音质阶梯都不可用说明是版权问题而非瞬时抖动，短期内同曲直接跳跨平台，省下阶梯请求。
 const TRACK_UNAVAILABLE_TTL = CACHE_TTL;
+// 交付体检：返回地址前只取前几个字节确认真的能拉流（CDN 请求，不消耗 ChKSz 额度）。
+const DELIVERY_UNUSABLE_ERROR = "CHKSZ_DELIVERY_UNUSABLE";
+const PROBE_TIMEOUT = 4_000;
+const PROBE_RANGE = "bytes=0-3";
+// 只有这些错误才说明"地址打不开"；宿主不支持体检选项等其它错误按无法判定处理，不降级。
+const UNREACHABLE_PROBE_CODES = new Set([
+  REQUEST_TIMEOUT_ERROR,
+  "PLUGIN_REQUEST_TIMEOUT",
+  "PLUGIN_NETWORK_ERROR",
+  "REQUEST_TIMEOUT",
+  "ETIMEDOUT",
+  "ESOCKETTIMEDOUT",
+  "ENOTFOUND",
+  "ECONNREFUSED",
+  "ECONNRESET",
+  "EAI_AGAIN",
+]);
 
 const QUALITY_NAMES = ["lq", "sq", "hq", "lossless", "hi-res"];
 // 母带/音效档：实测网易云这些档位交付 192kHz/24-bit FLAC，单曲 46–150MB（一首 153 秒
@@ -245,7 +262,8 @@ const createResolutionCore = () => {
       economyMode: enabledSetting("economyMode", false),
       metadataFallback: enabledSetting("metadataFallback", true),
       crossPlatformFallback: enabledSetting(CROSS_PLATFORM_SETTING, true),
-      playableFirst: enabledSetting("playableFirst", true),
+      playableFirst: enabledSetting("playableFirst", false),
+      verifyDelivery: enabledSetting("verifyDelivery", true),
     };
     const signature = JSON.stringify([apiKey, config]);
     if (session?.signature !== signature) {
@@ -253,7 +271,7 @@ const createResolutionCore = () => {
         apiKey, config, signature,
         responses: new Map(), metadata: new Map(), actions: new Map(),
         pending: new Map(), actionPending: new Map(),
-        channelCooldowns: new Map(), unavailableTracks: new Map(),
+        channelCooldowns: new Map(), unavailableTracks: new Map(), probes: new Map(),
         rateLimitUntil: 0,
       };
     }
@@ -643,6 +661,53 @@ const createResolutionCore = () => {
     }
   };
 
+  const isTierUnavailable = (error) =>
+    isUnavailableQualityError(error) || error?.code === DELIVERY_UNUSABLE_ERROR;
+
+  /**
+   * 返回地址前的交付体检：只取前几个字节确认地址真的能拉流。
+   * SPlayer 在播放失败时只会换音源、不会降音质，所以"这个地址能不能播"必须由插件自己兜。
+   * @returns 不可用原因；可以放行时返回空串
+   */
+  const probeDelivery = async (url, state, deadline) => {
+    const cached = readCache(state.probes, url);
+    if (cached !== undefined) return cached;
+    const remaining = Number.isFinite(deadline) ? deadline - Date.now() : Infinity;
+    // 时间预算已经用尽时不再体检，交给调用方按原结果返回。
+    if (remaining <= 0) return "";
+
+    let response;
+    try {
+      response = await requestWithTimeout(url, {
+        method: "GET",
+        headers: { Range: PROBE_RANGE },
+        responseType: "arraybuffer",
+        timeout: Math.max(1, Math.min(PROBE_TIMEOUT, remaining)),
+      });
+    } catch (error) {
+      if (!UNREACHABLE_PROBE_CODES.has(String(error?.code))) {
+        // 老版本宿主可能不支持自定义头或 arraybuffer；无法判定时按可用处理，绝不因此降级。
+        splayer.log.debug(
+          `ChKSz 交付体检无法判定，按可用处理：${redactSensitiveData(error?.message ?? error)}`,
+        );
+        return "";
+      }
+      const reason = `地址打不开（${redactSensitiveData(error?.message ?? error)}）`;
+      writeCache(state.probes, url, reason, Date.now() + CACHE_TTL);
+      return reason;
+    }
+
+    const status = Number(response?.status) || 0;
+    if (status < 200 || status >= 300) {
+      const reason = `地址返回 HTTP ${status}`;
+      writeCache(state.probes, url, reason, Date.now() + CACHE_TTL);
+      return reason;
+    }
+
+    writeCache(state.probes, url, "", Date.now() + CACHE_TTL);
+    return "";
+  };
+
   const hasActionMetadata = (body, action) => {
     const fields = action === "musicLyric"
       ? ["lyric", "lrc", "awlyric", "yrc", "qrc", "krc"]
@@ -816,6 +881,13 @@ const createResolutionCore = () => {
 
       try {
         body = await requestJson(policy.playback.endpoint, params, requestContext);
+        if (state?.config.verifyDelivery) {
+          const candidateUrl = extractUrl(body);
+          if (candidateUrl) {
+            const unusable = await probeDelivery(candidateUrl, state, requestContext.deadline);
+            if (unusable) throw pluginError(DELIVERY_UNUSABLE_ERROR, unusable);
+          }
+        }
         resolvedQuality = candidateQuality;
         break;
       } catch (error) {
@@ -824,7 +896,7 @@ const createResolutionCore = () => {
         if (!hasFallback && state && !economyMode && isUnavailableQualityError(error)) {
           rememberUnavailableTrack(state, source, id, error);
         }
-        if (!hasFallback || !isUnavailableQualityError(error)) throw error;
+        if (!hasFallback || !isTierUnavailable(error)) throw error;
       }
     }
 
@@ -1271,7 +1343,15 @@ runtimeAdapter.register({
       type: "switch",
       label: "可播放优先（母带档留到最后）",
       description:
-        "请求 hi-res 时先取 hires、无损等通用档位，把网易云的母带/音效档（jymaster 等）排到最后。实测这些档位单曲可达 46–150MB、192kHz/24-bit，在部分播放器上无法起播；想优先母带时可关闭。",
+        "默认母带优先，拿最好的音质。网络或设备吃不下 46–150MB 的母带文件时打开：改为先取 hires、无损等通用档位，把网易云的母带/音效档排到最后。",
+      default: false,
+    },
+    {
+      key: "verifyDelivery",
+      type: "switch",
+      label: "交付体检（返回前验证地址能拉流）",
+      description:
+        "拿到播放地址后先取前几个字节确认可访问，地址被拒或打不开时自动改用下一档。这是 CDN 请求，不消耗 ChKSz 额度。",
       default: true,
     },
     {
