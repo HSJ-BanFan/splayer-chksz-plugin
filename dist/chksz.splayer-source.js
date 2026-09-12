@@ -2,7 +2,7 @@
  * @name        ChKSz 音源
  * @id          chksz.splayer-source
  * @version     0.6.0
- * @description 使用 ChKSz API 解析网易云、QQ 音乐和酷狗播放地址
+ * @description 为 SPlayer-Next 解析网易云 / QQ 音乐 / 酷狗音源：超清母带、Hi-Res、无损，无版权歌曲自动跨平台兜底
  * @author      HSJ-BanFan
  * @homepage    https://github.com/HSJ-BanFan/splayer-chksz-plugin
  * @type        source

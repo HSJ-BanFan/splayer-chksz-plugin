@@ -2,7 +2,7 @@
   "name": "splayer-chksz-plugin",
   "version": "0.6.0",
   "private": true,
-  "description": "ChKSz playback source plugin for SPlayer-Next",
+  "description": "SPlayer-Next 音源插件：网易云音乐 / QQ 音乐 / 酷狗播放地址解析，支持超清母带、Hi-Res、无损与无版权歌曲跨平台兜底 (ChKSz API source plugin for SPlayer-Next)",
   "license": "MIT",
   "homepage": "https://github.com/HSJ-BanFan/splayer-chksz-plugin",
   "repository": {
