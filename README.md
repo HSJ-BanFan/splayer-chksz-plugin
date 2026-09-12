@@ -29,6 +29,23 @@
 
 对应接口文档：[网易云音乐](https://api.chksz.com/docs/163_music.html)、[QQ 音乐](https://api.chksz.com/docs/qq_music.html)、[酷狗音乐](https://api.chksz.com/docs/kugou_music.html)。
 
+### 音质是怎么定的
+
+「音质」在三层里含义不同，而且**不是一一对应**：
+
+| 层 | 取值 | 谁说了算 |
+| --- | --- | --- |
+| SPlayer 逻辑音质 | `lq` `sq` `hq` `lossless` `hi-res` | 播放器界面 |
+| ChKSz 原生档位 | 网易云 `level`：`standard` `exhigh` `lossless` `hires` `jyeffect` `sky` `jymaster`；QQ / 酷狗 `size`：`128k` `320k` `flac` `hires` `master` | 接口文档 |
+| CDN 实际交付 | 编码与码率（实测 128 / 320 kbps MP3、962 kbps FLAC、5667 kbps FLAC） | 响应体 `level`/`bitrate` 与文件头 |
+
+映射是多对一的：`hq` 与 `sq` 共用 `exhigh` / `320k`；`hi-res` 对应 `jymaster`（网易云）/ `master`（QQ、酷狗）/ `hires` / `sky` / `jyeffect` 五个不同事实。因此：
+
+- **请求**档位由 SPlayer 音质按上一节的映射表决定；
+- **上报**的 `quality` 取自响应体里服务端实际交付的档位（`level` / `bitrate` / `format`），响应体没有该字段时才退回请求档位。实测请求 `hires` 时服务端会静默返回 `lossless`（`br` 与 lossless 完全一致），此时插件上报 `lossless`，不会把已经降级的地址标成 `hi-res`；
+- 网易云的 `sky` / `jyeffect` 两档插件不使用；由于 `hq` / `sq` 共用一个原生档位，`sq` 请求成功时上报 `hq`，这是能给出的最精确答案。
+- 接口文档声明「服务端不做别名或降级映射」，但实测存在静默降级，所以不要用请求档位推断实际交付的档位。
+
 ## 构建
 
 需要 Node.js 20 或更高版本：

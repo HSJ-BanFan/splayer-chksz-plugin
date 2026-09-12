@@ -42,6 +42,21 @@ const CHANNEL_COOLDOWN = 2 * 60_000;
 const TRACK_UNAVAILABLE_TTL = CACHE_TTL;
 
 const QUALITY_NAMES = ["lq", "sq", "hq", "lossless", "hi-res"];
+// ChKSz 原生档位 → SPlayer 逻辑音质。多对一是不可避免的：hq/sq 共用一个原生档位，
+// hi-res 对应 jymaster/hires/sky/jyeffect 四个不同的事实，所以只用于"实际交付了什么"。
+const NATIVE_QUALITY_LEVELS = {
+  standard: "lq",
+  "128k": "lq",
+  exhigh: "hq",
+  "320k": "hq",
+  lossless: "lossless",
+  flac: "lossless",
+  hires: "hi-res",
+  master: "hi-res",
+  jymaster: "hi-res",
+  sky: "hi-res",
+  jyeffect: "hi-res",
+};
 // Logical downgrade ladder shared by every provider: hi-res → lossless → hq → sq → lq.
 const QUALITY_FALLBACKS = Object.fromEntries(
   QUALITY_NAMES.map((quality, index) => [
@@ -720,6 +735,21 @@ const createResolutionCore = () => {
     return undefined;
   };
 
+  /**
+   * 服务端会用响应体里的 level/bitrate/format 说明实际交付的档位。
+   * 实测请求 hires 时服务端会静默返回 lossless，因此不能拿请求档位当结果。
+   */
+  const readServedQuality = (body) => {
+    for (const container of [body, body?.data, body?.result]) {
+      if (!isRecord(container)) continue;
+      for (const key of ["level", "bitrate", "format"]) {
+        const logical = NATIVE_QUALITY_LEVELS[textOrEmpty(container[key]).toLowerCase()];
+        if (logical) return logical;
+      }
+    }
+    return "";
+  };
+
   const normalisePlaybackResponse = (body) => {
     const url = extractUrl(body);
     if (!url) {
@@ -786,7 +816,8 @@ const createResolutionCore = () => {
     }
 
     const result = normalisePlaybackResponse(body);
-    result.quality = resolvedQuality;
+    // 上报服务端实际交付的档位；响应体没有档位字段时退回请求的逻辑档位。
+    result.quality = readServedQuality(body) || resolvedQuality;
     return { result, body };
   };
 

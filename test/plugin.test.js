@@ -330,6 +330,76 @@ test("falls through the supported NetEase quality ladder and reports the effecti
   assert.equal(result.quality, "lq");
 });
 
+test("reports the quality the provider served instead of the requested one", async () => {
+  const { handlers, requests } = loadPlugin({
+    response: {
+      status: 200,
+      body: {
+        code: 200,
+        data: { url: "https://cdn.example.test/song.flac", level: "lossless", br: 962359 },
+      },
+    },
+  });
+
+  const result = await handlers.musicUrl({
+    source: "wy",
+    quality: "hi-res",
+    musicInfo: { id: "22831636" },
+  });
+
+  assert.equal(requests.length, 1, "服务端第一档就返回了地址");
+  assert.equal(
+    result.quality,
+    "lossless",
+    "服务端把 hires 静默降级为 lossless 时不能仍然上报 hi-res",
+  );
+});
+
+test("maps every provider-native level back to a logical quality", async () => {
+  for (const [level, expected] of [
+    ["standard", "lq"],
+    ["exhigh", "hq"],
+    ["lossless", "lossless"],
+    ["hires", "hi-res"],
+    ["jymaster", "hi-res"],
+    ["sky", "hi-res"],
+    ["jyeffect", "hi-res"],
+  ]) {
+    const { handlers } = loadPlugin({
+      response: { status: 200, body: { code: 200, data: { url: "https://cdn.example.test/a.flac", level } } },
+    });
+
+    const result = await handlers.musicUrl({ source: "wy", quality: "hi-res", musicInfo: { id: "1" } });
+
+    assert.equal(result.quality, expected, `level=${level}`);
+  }
+});
+
+test("maps QQ and Kugou bitrate fields back to a logical quality", async () => {
+  for (const [source, musicInfo] of [["tx", { songmid: "qq-1" }], ["kg", { id: "kg-1" }]]) {
+    const { handlers } = loadPlugin({
+      response: {
+        status: 200,
+        body: { code: 200, url: "https://cdn.example.test/song.flac", bitrate: "flac", format: "flac" },
+      },
+    });
+
+    const result = await handlers.musicUrl({ source, quality: "hi-res", musicInfo });
+
+    assert.equal(result.quality, "lossless", source);
+  }
+});
+
+test("keeps the requested logical quality when the response carries no native level", async () => {
+  const { handlers } = loadPlugin({
+    response: { status: 200, body: { code: 200, url: "https://cdn.example.test/song.mp3" } },
+  });
+
+  const result = await handlers.musicUrl({ source: "wy", quality: "lossless", musicInfo: { id: "1" } });
+
+  assert.equal(result.quality, "lossless");
+});
+
 test("maps QQ and Kugou IDs and native quality values", async () => {
   const { handlers, requests } = loadPlugin({
     response: (url) => ({ status: 200, body: { url: `https://cdn.example.test/${url.pathname}.mp3` } }),
