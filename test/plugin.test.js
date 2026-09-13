@@ -688,3 +688,29 @@ test("fails before making a request when the API key is missing", async () => {
   );
   assert.equal(requests.length, 0);
 });
+
+test("logs one info line when a URL is resolved directly, so silence means the plugin was never called", async () => {
+  const { handlers, logs } = loadPlugin({
+    response: {
+      status: 200,
+      body: { code: 200, data: { url: "https://cdn.example.test/song.flac", level: "lossless" } },
+    },
+  });
+
+  await handlers.musicUrl({
+    source: "wy",
+    quality: "hi-res",
+    musicInfo: { id: "22831636", name: "My jealousy (Original ver.)", singer: "DJMAX" },
+  });
+
+  const success = logs.filter(
+    (entry) => entry.level === "info" && /My jealousy \(Original ver\.\)/.test(entry.args.join(" ")),
+  );
+  assert.equal(success.length, 1, "直接解析成功时应恰好写一行 info 日志");
+  assert.match(success[0].args.join(" "), /网易云/);
+  assert.match(success[0].args.join(" "), /lossless/, "日志里写的是服务端实际交付的档位");
+  assert.ok(
+    logs.every((entry) => !/cdn\.example\.test|chksz_test_key/.test(entry.args.join(" "))),
+    "成功日志不应包含播放地址或 API Key",
+  );
+});

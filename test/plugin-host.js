@@ -14,6 +14,7 @@ export const loadPlugin = ({
   settings: settingOverrides = {},
   response,
   probeResponse,
+  directSearchResponse,
   now = () => Date.now(),
   sourceText = pluginSource,
 } = {}) => {
@@ -21,6 +22,7 @@ export const loadPlugin = ({
   const handlers = {};
   const requests = [];
   const deliveryProbes = [];
+  const directSearches = [];
   const hostRequests = [];
   const logs = [];
   const settings = { apiKey, ...settingOverrides };
@@ -50,6 +52,15 @@ export const loadPlugin = ({
         return typeof probeResponse === "function"
           ? probeResponse(new URL(url), options)
           : probeResponse;
+      }
+      // 备用搜索打的是 QQ 音乐等公开接口，不是 ChKSz；单独记账，默认当作不可用，
+      // 这样既有测试的 `requests` 和错误语义都不变，要模拟命中就传 directSearchResponse。
+      if (new URL(url).host !== "api.chksz.com") {
+        directSearches.push(entry);
+        if (directSearchResponse === undefined) return { status: 503, body: "" };
+        return typeof directSearchResponse === "function"
+          ? directSearchResponse(new URL(url), options)
+          : directSearchResponse;
       }
       requests.push(entry);
       return typeof response === "function"
@@ -86,6 +97,7 @@ export const loadPlugin = ({
     handlers,
     requests,
     deliveryProbes,
+    directSearches,
     hostRequests,
     logs,
     setSetting(key, value) { settings[key] = value; },
