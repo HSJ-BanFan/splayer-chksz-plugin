@@ -134,6 +134,48 @@ test("uses a NetEase search id when QQ is the failed primary source", async () =
   assert.equal(result.quality, "lossless");
 });
 
+test("rejects a version-relaxed NetEase candidate when its duration is unavailable", async () => {
+  const { handlers, requests } = loadPlugin({
+    response: (url) => {
+      if (url.pathname === "/api/qq_music") {
+        return { status: 502, body: { msg: "upstream unavailable" } };
+      }
+      if (url.pathname === "/api/163_search") {
+        return {
+          status: 200,
+          body: {
+            code: 200,
+            data: [{ id: "wy-clean-title", name: "My jealousy", artists: "DJMAX" }],
+          },
+        };
+      }
+      if (url.pathname === "/api/kugou_music") {
+        return { status: 200, body: { code: 200, list: [] } };
+      }
+      return { status: 200, body: { code: 200, url: "https://wy.example.test/wrong-version.flac" } };
+    },
+  });
+
+  await assert.rejects(
+    handlers.musicUrl({
+      source: "tx",
+      quality: "lq",
+      musicInfo: {
+        source: "tx",
+        mid: "qq-primary-id",
+        name: "My jealousy (Live)",
+        singer: "DJMAX",
+        interval: "02:33",
+      },
+    }),
+    { code: "CHKSZ_CROSS_PLATFORM_UNAVAILABLE" },
+  );
+  assert.ok(
+    !requests.some(({ url }) => new URL(url).pathname === "/api/163_music"),
+    "a NetEase candidate without duration must not enter playback resolution",
+  );
+});
+
 test("keeps an upstream diagnosis when no alternate platform matches", async () => {
   const { handlers } = loadPlugin({
     directSearchResponse: {

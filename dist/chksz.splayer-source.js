@@ -24,6 +24,7 @@ const CROSS_PLATFORM_REQUEST_BUDGET = 8;
 const CROSS_PLATFORM_TIME_BUDGET = 10_000;
 const CROSS_PLATFORM_LIMIT_ERROR = "CHKSZ_CROSS_PLATFORM_LIMIT";
 const CROSS_PLATFORM_UNAVAILABLE_ERROR = "CHKSZ_CROSS_PLATFORM_UNAVAILABLE";
+const CHANNEL_COOLDOWN_ERROR = "CHKSZ_CHANNEL_COOLDOWN";
 const RATE_LIMIT_ERROR = "CHKSZ_RATE_LIMITED";
 const RESOLUTION_TIME_BUDGET = 18_000;
 const RESOLUTION_TIMEOUT_ERROR = "CHKSZ_RESOLUTION_TIMEOUT";
@@ -1047,7 +1048,11 @@ const createResolutionCore = () => {
   };
 
   /** 0 = different song, 2 = exact normalised title, 1 = relaxed title match. */
-  const matchScore = (track, candidate, { requireDuration = false } = {}) => {
+  const matchScore = (
+    track,
+    candidate,
+    { requireDuration = false, requireDurationForRelaxed = false } = {},
+  ) => {
     if (!isRecord(candidate)) return 0;
     const wantedName = normaliseText(track.name);
     const candidateName = normaliseText(candidate.name);
@@ -1072,6 +1077,7 @@ const createResolutionCore = () => {
       candidate.interval ?? candidate.duration,
     );
     if (requireDuration && wantedSeconds && !candidateSeconds) return 0;
+    if (requireDurationForRelaxed && relaxed && wantedSeconds && !candidateSeconds) return 0;
     if (
       wantedSeconds &&
       candidateSeconds &&
@@ -1282,7 +1288,12 @@ const createResolutionCore = () => {
     }
   };
 
-  const findMatchingTracks = async (source, track, requestContext = {}) => {
+  const findMatchingTracks = async (
+    source,
+    track,
+    requestContext = {},
+    matchOptions = {},
+  ) => {
     const { search } = getSourcePolicy(source);
     const keyword = buildSearchKeyword(track);
     const candidates = await searchCandidates(source, keyword, requestContext);
@@ -1290,7 +1301,7 @@ const createResolutionCore = () => {
     const matches = [];
     for (const rawCandidate of candidates) {
       const candidate = normaliseCandidate(rawCandidate);
-      const score = matchScore(track, candidate);
+      const score = matchScore(track, candidate, matchOptions);
       if (score <= 0 || !isRecord(candidate)) continue;
       const rawId = candidate[search.candidateIdField];
       const id = typeof rawId === "number" ? String(rawId) : textOrEmpty(rawId);
@@ -1332,7 +1343,23 @@ const createResolutionCore = () => {
         continue;
       }
       try {
-        const matches = await findMatchingTracks(targetSource, track, requestContext);
+        const trackHasDuration = parseDurationSeconds(track.interval) > 0;
+        const matchOptions = {
+          // ChKSz's NetEase search contract does not promise duration. Keep exact
+          // title matches usable, but never let an unknown-duration clean title
+          // replace a versioned original through the relaxed-match path.
+          requireDurationForRelaxed: targetSource === "wy" && trackHasDuration,
+          requireDuration: targetSource !== "wy" && trackHasDuration,
+        };
+        const searchMatchOptions = {
+          requireDurationForRelaxed: matchOptions.requireDurationForRelaxed,
+        };
+        const matches = await findMatchingTracks(
+          targetSource,
+          track,
+          requestContext,
+          searchMatchOptions,
+        );
         // 搜索本身跑通了才算"这首歌在该平台不存在"；搜索失败只能说明平台不可用。
         completedSearch = true;
         attempts.push({
@@ -1352,12 +1379,9 @@ const createResolutionCore = () => {
               ...candidate,
               ...details,
             };
-            // 网易云搜索/详情文档不保证返回时长；QQ 与酷狗候选仍要求时长可校验。
-            const requireDuration =
-              targetSource !== "wy" && parseDurationSeconds(track.interval) > 0;
             if (
               targetSource === "tx" &&
-              requireDuration &&
+              matchOptions.requireDuration &&
               parseDurationSeconds(details.interval) <= 0
             ) {
               splayer.log.warn(
@@ -1365,7 +1389,7 @@ const createResolutionCore = () => {
               );
               continue;
             }
-            if (matchScore(track, resolvedCandidate, { requireDuration }) <= 0) {
+            if (matchScore(track, resolvedCandidate, matchOptions) <= 0) {
               splayer.log.warn(
                 `${targetPolicy.name} 候选（${id}）未通过《${track.name}》的时长校验。`,
               );
@@ -1439,6 +1463,33 @@ const createResolutionCore = () => {
     const { policy } = buildTrackParams(source, id, quality);
     const descriptor = getTrackDescriptor(track);
     const deadline = Date.now() + RESOLUTION_TIME_BUDGET;
+    const canCrossSearch =
+      Boolean(policy.crossPlatform) &&
+      Boolean(descriptor.name) &&
+      state.config.crossPlatformFallback;
+
+    const primaryCooldownSeconds = coolingDownChannel(state, source);
+    if (primaryCooldownSeconds > 0) {
+      const cooldownError = pluginError(
+        CHANNEL_COOLDOWN_ERROR,
+        `${policy.name}上游通道冷却中（还剩 ${primaryCooldownSeconds} 秒），跳过本次主渠道请求。`,
+      );
+      if (!canCrossSearch) throw cooldownError;
+
+      const fallback = await resolveAcrossPlatforms(
+        policy,
+        quality,
+        descriptor,
+        deadline,
+        state,
+        cooldownError,
+      );
+      if (fallback) return fallback;
+      throw pluginError(
+        CROSS_PLATFORM_UNAVAILABLE_ERROR,
+        `${cooldownError.message}且在其他平台中未匹配到《${descriptor.name}》。请稍后重试或更换音源。`,
+      );
+    }
 
     try {
       const resolution = await resolveOnPlatform(source, quality, id, { deadline, state });
@@ -1449,12 +1500,10 @@ const createResolutionCore = () => {
       return resolution.result;
     } catch (error) {
       noteChannelFailure(state, source, error);
-      const canCrossSearch =
-        Boolean(policy.crossPlatform) &&
-        (isUnavailableQualityError(error) || isUpstreamUnavailableError(error)) &&
-        Boolean(descriptor.name) &&
-        state.config.crossPlatformFallback;
-      if (!canCrossSearch) throw error;
+      const canCrossSearchAfterFailure =
+        canCrossSearch &&
+        (isUnavailableQualityError(error) || isUpstreamUnavailableError(error));
+      if (!canCrossSearchAfterFailure) throw error;
 
       const fallback = await resolveAcrossPlatforms(policy, quality, descriptor, deadline, state, error);
       if (fallback) return fallback;

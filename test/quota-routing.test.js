@@ -139,13 +139,15 @@ test("failed and cancelled resolutions are not retained as song unavailability",
     { status: 404, body: { msg: "endpoint missing" } },
   ]) {
     let failed = true;
-    const host = loadPlugin({ settings: { crossPlatformFallback: false }, response: () => {
+    let time = START;
+    const host = loadPlugin({ now: () => time, settings: { crossPlatformFallback: false }, response: () => {
       if (!failed) return success();
       if (failure instanceof Error) throw failure;
       return failure;
     } });
     await assert.rejects(host.handlers.musicUrl(SONG));
     failed = false;
+    if (failure?.status === 503) time += 121_000;
     assert.equal((await host.handlers.musicUrl(SONG)).quality, "hq");
     assert.equal(host.requests.length, 2);
   }

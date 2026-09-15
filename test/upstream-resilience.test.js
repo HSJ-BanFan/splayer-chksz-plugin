@@ -102,6 +102,44 @@ test("an upstream 502 cools that platform down instead of re-probing it for the 
   assert.ok(paths(host).includes("/api/kugou_music"), "冷却结束后应重新探测酷狗");
 });
 
+test("skips a cooled primary platform before trying the next song", async () => {
+  const host = loadPlugin({
+    response: (url) => {
+      if (url.pathname === "/api/163_music") {
+        return { status: 502, body: { msg: "upstream unavailable" } };
+      }
+      if (url.pathname === "/api/qq_music" && url.searchParams.has("msg")) {
+        return {
+          status: 200,
+          body: {
+            code: 200,
+            list: [{ name: "晴天", singer: "周杰伦", mid: "qq-cooldown-mid" }],
+          },
+        };
+      }
+      return {
+        status: 200,
+        body: {
+          code: 200,
+          name: "晴天",
+          singer: "周杰伦",
+          interval: "04:29",
+          url: "https://qq.example.test/cooldown.mp3",
+        },
+      };
+    },
+  });
+
+  await host.handlers.musicUrl(song({ id: "primary-first" }, "lq"));
+
+  host.requests.length = 0;
+  const result = await host.handlers.musicUrl(song({ id: "primary-second" }, "lq"));
+
+  assert.equal(result.url, "https://qq.example.test/cooldown.mp3");
+  assert.ok(!paths(host).includes("/api/163_music"), "cooled primary must not be retried");
+  assert.ok(paths(host).includes("/api/qq_music"), "fallback should try another platform");
+});
+
 test("reports an upstream outage instead of claiming the song does not exist", async () => {
   const host = loadPlugin({
     response: (url) => {
