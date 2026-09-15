@@ -193,7 +193,7 @@ const SOURCE_POLICIES = {
   },
   kg: {
     name: "ChKSz 酷狗",
-    identity: { idParameter: "id", idFields: ["id", "hash", "songId"] },
+    identity: { idParameter: "id", idFields: ["hash", "id", "songId"] },
     playback: {
       endpoint: "/api/kugou_music",
       qualityParameter: "size",
@@ -1382,7 +1382,7 @@ const createResolutionCore = () => {
             if (
               targetSource === "tx" &&
               matchOptions.requireDuration &&
-              parseDurationSeconds(details.interval) <= 0
+              parseDurationSeconds(details.interval ?? details.duration) <= 0
             ) {
               splayer.log.warn(
                 `${targetPolicy.name} 候选（${id}）详情缺少有效时长，跳过《${track.name}》。`,
@@ -1410,6 +1410,7 @@ const createResolutionCore = () => {
             if (isAccountError(error)) throw error;
             rememberRecoverableError(error);
             noteChannelFailure(state, targetSource, error);
+            if (coolingDownChannel(state, targetSource) > 0) break;
             splayer.log.warn(
               `${targetPolicy.name} 匹配《${track.name}》失败：${error?.message ?? error}`,
             );

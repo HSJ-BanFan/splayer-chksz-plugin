@@ -31,7 +31,7 @@ const SOURCES = [
     path: "/api/kugou_music",
     idParameter: "id",
     id: "kg-hash-1",
-    musicInfo: { id: "kg-hash-1", hash: "wrong-hash", songmid: "wrong-qq-mid" },
+    musicInfo: { id: "wrong-generic-id", hash: "kg-hash-1", songmid: "wrong-qq-mid" },
   },
 ];
 

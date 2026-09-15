@@ -26,8 +26,8 @@ test("reads the identifier belonging to the selected source", async () => {
     },
     {
       source: "kg",
-      musicInfo: { id: "kg-id", hash: "wrong-hash", songmid: "wrong-songmid" },
-      expected: { path: "/api/kugou_music", id: "kg-id", mid: null },
+      musicInfo: { id: "wrong-generic-id", hash: "kg-hash", songmid: "wrong-songmid" },
+      expected: { path: "/api/kugou_music", id: "kg-hash", mid: null },
     },
   ];
 

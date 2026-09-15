@@ -450,7 +450,7 @@ test("preserves a provider error when the cross-platform budget is exhausted", a
   );
 });
 
-test("preserves an earlier provider error when a later probe hits the budget", async () => {
+test("preserves a provider error and stops probing the cooled platform", async () => {
   const qqCandidates = Array.from({ length: 3 }, (_, index) => ({
     name: "晴天",
     singer: "周杰伦",
@@ -478,7 +478,14 @@ test("preserves an earlier provider error when a later probe hits the budget", a
       error.code === "CHKSZ_HTTP_503" &&
       error.message.includes("provider temporarily unavailable"),
   );
-  assert.equal(requests.slice(5).length, 8);
+  const qqProbes = requests.filter(({ url }) => {
+    const requestUrl = new URL(url);
+    return requestUrl.pathname === "/api/qq_music" && requestUrl.searchParams.has("mid");
+  });
+  assert.deepEqual(
+    qqProbes.map(({ url }) => new URL(url).searchParams.get("mid")),
+    ["qq-provider-error"],
+  );
 });
 
 test("stops cross-platform fallback when the host cancels a request", async () => {

@@ -3,6 +3,11 @@ import { test } from "node:test";
 
 import { loadPlugin } from "./plugin-host.js";
 
+const UNAVAILABLE = {
+  status: 404,
+  body: { msg: "Music URL not found, song may be unavailable at this quality level" },
+};
+
 const describeRequest = (request) => {
   const url = new URL(request.url);
   const params = Object.fromEntries(url.searchParams.entries());
@@ -72,6 +77,57 @@ test("falls back from a Kugou upstream failure to a matching QQ mid", async () =
   assert.equal(result.quality, "lossless");
 });
 
+test("stops probing a fallback platform after its first upstream failure", async () => {
+  const { handlers, requests } = loadPlugin({
+    settings: { directSearchFallback: false },
+    response: (url) => {
+      if (url.pathname === "/api/163_music") return UNAVAILABLE;
+      if (url.pathname === "/api/qq_music") {
+        return { status: 200, body: { code: 200, list: [] } };
+      }
+      if (url.pathname === "/api/kugou_music" && url.searchParams.has("msg")) {
+        return {
+          status: 200,
+          body: {
+            code: 200,
+            list: [
+              { id: "kg-first", name: "晴天", singer: "周杰伦", duration: 269 },
+              { id: "kg-second", name: "晴天", singer: "周杰伦", duration: 269 },
+            ],
+          },
+        };
+      }
+      if (url.pathname === "/api/kugou_music" && url.searchParams.get("id") === "kg-first") {
+        return { status: 502, body: { msg: "upstream unavailable" } };
+      }
+      return { status: 200, body: { code: 200, url: "https://kg.example.test/second.mp3" } };
+    },
+  });
+
+  await assert.rejects(
+    handlers.musicUrl({
+      source: "wy",
+      quality: "lq",
+      musicInfo: {
+        source: "wy",
+        id: "wy-primary-id",
+        name: "晴天",
+        singer: "周杰伦",
+        interval: "04:29",
+      },
+    }),
+    { code: "CHKSZ_HTTP_502" },
+  );
+
+  assert.deepEqual(
+    requests
+      .filter(({ url }) => new URL(url).pathname === "/api/kugou_music")
+      .map(({ url }) => new URL(url).searchParams.get("id")),
+    [null, "kg-first"],
+    "a cooled fallback platform must not probe its remaining candidates",
+  );
+});
+
 test("uses a NetEase search id when QQ is the failed primary source", async () => {
   const { handlers, requests } = loadPlugin({
     response: (url) => {
@@ -132,6 +188,54 @@ test("uses a NetEase search id when QQ is the failed primary source", async () =
   ]);
   assert.equal(result.url, "https://wy.example.test/qingtian.flac");
   assert.equal(result.quality, "lossless");
+});
+
+test("accepts a QQ fallback detail when duration is present without interval", async () => {
+  const { handlers, requests } = loadPlugin({
+    settings: { directSearchFallback: false },
+    response: (url) => {
+      if (url.pathname === "/api/163_music") return UNAVAILABLE;
+      if (url.pathname === "/api/qq_music" && url.searchParams.has("msg")) {
+        return {
+          status: 200,
+          body: {
+            code: 200,
+            list: [{ name: "晴天", singer: "周杰伦", mid: "qq-duration-only" }],
+          },
+        };
+      }
+      if (url.pathname === "/api/qq_music") {
+        return {
+          status: 200,
+          body: {
+            code: 200,
+            name: "晴天",
+            singer: "周杰伦",
+            duration: 269,
+            url: "https://qq.example.test/duration-only.mp3",
+          },
+        };
+      }
+      return { status: 200, body: { code: 200, list: [] } };
+    },
+  });
+
+  const result = await handlers.musicUrl({
+    source: "wy",
+    quality: "hq",
+    musicInfo: {
+      source: "wy",
+      id: "wy-primary-id",
+      name: "晴天",
+      singer: "周杰伦",
+      interval: "04:29",
+    },
+  });
+
+  assert.equal(result.url, "https://qq.example.test/duration-only.mp3");
+  assert.ok(
+    requests.some(({ url }) => new URL(url).searchParams.get("mid") === "qq-duration-only"),
+  );
 });
 
 test("rejects a version-relaxed NetEase candidate when its duration is unavailable", async () => {
