@@ -539,9 +539,12 @@ test("rejects a version-only candidate instead of playing it as the original", a
   );
 });
 
-test("does not cross-search for QQ Music or Kugou tracks", async () => {
+test("can disable cross-platform matching for QQ Music or Kugou tracks", async () => {
   for (const source of ["tx", "kg"]) {
-    const { handlers, requests } = loadPlugin({ response: UNAVAILABLE });
+    const { handlers, requests } = loadPlugin({
+      settings: { crossPlatformFallback: false },
+      response: UNAVAILABLE,
+    });
 
     await assert.rejects(
       handlers.musicUrl({ source, quality: "lq", musicInfo: { ...JAY_TRACK, source } }),
@@ -642,5 +645,6 @@ test("registers the cross-platform switch as an opt-out setting", () => {
 
   assert.equal(setting.type, "switch");
   assert.equal(setting.default, true);
-  assert.match(setting.label, /QQ 音乐/);
+  assert.match(setting.label, /跨平台/);
+  assert.match(setting.description, /目标平台/);
 });

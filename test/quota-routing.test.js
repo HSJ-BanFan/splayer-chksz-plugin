@@ -139,7 +139,7 @@ test("failed and cancelled resolutions are not retained as song unavailability",
     { status: 404, body: { msg: "endpoint missing" } },
   ]) {
     let failed = true;
-    const host = loadPlugin({ response: () => {
+    const host = loadPlugin({ settings: { crossPlatformFallback: false }, response: () => {
       if (!failed) return success();
       if (failure instanceof Error) throw failure;
       return failure;

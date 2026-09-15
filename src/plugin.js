@@ -1,7 +1,7 @@
 /**
  * @name        ChKSz 音源
  * @id          chksz.splayer-source
- * @version     0.7.0
+ * @version     0.8.0
  * @description 为 SPlayer-Next 解析网易云 / QQ 音乐 / 酷狗音源：超清母带、Hi-Res、无损，无版权歌曲自动跨平台兜底
  * @author      HSJ-BanFan
  * @homepage    https://github.com/HSJ-BanFan/splayer-chksz-plugin
@@ -9,7 +9,7 @@
  * @grant       network
  * @apiLevel    2
  * @updateUrl   https://raw.githubusercontent.com/HSJ-BanFan/splayer-chksz-plugin/main/dist/chksz.splayer-source.js
- * @changelog   ChKSz 搜索故障时改用 QQ 音乐公开搜索拿 mid 再解析（不耗额度）；搜索连续 404 进入冷却；5xx 按 Retry-After 冷却；额度错误附剩余额度；解析成功也写日志
+ * @changelog   按来源读取平台 ID；上游故障时支持跨平台搜索与解析
  */
 
 const API_BASE_URL = "https://api.chksz.com";
@@ -101,7 +101,7 @@ const QUALITY_FALLBACKS = Object.fromEntries(
 const SOURCE_POLICIES = {
   wy: {
     name: "ChKSz 网易云",
-    identity: { idParameter: "id" },
+    identity: { idParameter: "id", idFields: ["id", "songId", "songmid"] },
     playback: {
       endpoint: "/api/163_music",
       qualityParameter: "level",
@@ -115,6 +115,12 @@ const SOURCE_POLICIES = {
       qualityAlternatives: { "hi-res": ["hires"] },
       qualityFallbacks: QUALITY_FALLBACKS,
     },
+    search: {
+      endpoint: "/api/163_search",
+      keywordParameter: "keyword",
+      params: { limit: SEARCH_RESULT_LIMIT },
+      candidateIdField: "id",
+    },
     // NetEase lacks the rights to many catalogues; look the same song up elsewhere.
     crossPlatform: { sources: ["tx", "kg"] },
     actions: {
@@ -127,7 +133,7 @@ const SOURCE_POLICIES = {
   },
   tx: {
     name: "ChKSz QQ 音乐",
-    identity: { idParameter: "mid" },
+    identity: { idParameter: "mid", idFields: ["songmid", "mid", "id", "songId"] },
     playback: {
       endpoint: "/api/qq_music",
       qualityParameter: "size",
@@ -147,6 +153,7 @@ const SOURCE_POLICIES = {
       params: { num: SEARCH_RESULT_LIMIT },
       candidateIdField: "mid",
     },
+    crossPlatform: { sources: ["wy", "kg"] },
     // ChKSz 搜索不可用时的备用搜索：QQ 音乐公开接口，结果映射成与 ChKSz 搜索相同的候选字段。
     directSearch: {
       name: "QQ 音乐公开搜索",
@@ -185,7 +192,7 @@ const SOURCE_POLICIES = {
   },
   kg: {
     name: "ChKSz 酷狗",
-    identity: { idParameter: "id" },
+    identity: { idParameter: "id", idFields: ["id", "hash", "songId"] },
     playback: {
       endpoint: "/api/kugou_music",
       qualityParameter: "size",
@@ -205,6 +212,7 @@ const SOURCE_POLICIES = {
       params: {},
       candidateIdField: "id",
     },
+    crossPlatform: { sources: ["tx", "wy"] },
     actions: {
       musicLyric: { request: "trackDetails" },
       musicPic: { request: "trackDetails" },
@@ -221,12 +229,13 @@ const pluginError = (code, message) => {
   return error;
 };
 
-const getMusicId = (musicInfo) => {
+const getMusicId = (source, musicInfo) => {
   if (!isRecord(musicInfo)) {
     throw pluginError("CHKSZ_TRACK_INVALID", "SPlayer 未提供有效的歌曲信息。");
   }
 
-  for (const key of ["songmid", "id", "songId"]) {
+  const fields = getSourcePolicy(source).identity.idFields ?? [];
+  for (const key of fields) {
     const value = musicInfo[key];
     if (typeof value === "string" && value.trim()) return value.trim();
     if (typeof value === "number" && Number.isFinite(value))
@@ -569,7 +578,9 @@ const createResolutionCore = () => {
       ? `ChKSz 请求失败（HTTP ${apiCode}）`
       : `ChKSz 返回错误码 ${apiCode}`;
     const code = isHttpStatus ? `CHKSZ_HTTP_${apiCode}` : `CHKSZ_API_${apiCode}`;
-    throw pluginError(code, bodyMessage ? `${prefix}：${bodyMessage}` : prefix);
+    const error = pluginError(code, bodyMessage ? `${prefix}：${bodyMessage}` : prefix);
+    error.status = apiCode;
+    throw error;
   };
 
   const isUnavailableQualityError = (error) =>
@@ -839,9 +850,11 @@ const createResolutionCore = () => {
     }
     assertCurrentSession(state);
     if (state.config.smartCache) {
-      if (params.msg) {
-        const hasList = [body, body.data, body.result].some((value) => Array.isArray(value?.list));
-        if (hasList) {
+      if (params.msg || params.keyword) {
+        const hasSearchShape = [body, body?.data, body?.result].some(
+          (value) => Array.isArray(value) || Array.isArray(value?.list),
+        );
+        if (hasSearchShape) {
           const ttl = extractCandidates(body).length ? CACHE_TTL : UNAVAILABLE_TTL;
           writeCache(state.responses, key, { body }, Date.now() + ttl);
         }
@@ -1072,6 +1085,7 @@ const createResolutionCore = () => {
 
   const extractCandidates = (body) => {
     for (const container of [body, body?.data, body?.result]) {
+      if (Array.isArray(container)) return container;
       if (Array.isArray(container?.list)) return container.list;
     }
     return [];
@@ -1081,14 +1095,24 @@ const createResolutionCore = () => {
     for (const container of [body, body?.data, body?.result]) {
       if (!isRecord(container)) continue;
       const details = {};
-      for (const key of ["name", "singer", "interval", "duration"]) {
+      for (const key of ["name", "singer", "artist", "artists", "interval", "duration"]) {
         if (container[key] !== undefined && container[key] !== null && container[key] !== "") {
           details[key] = container[key];
         }
       }
+      if (!details.singer) {
+        const singer = textOrEmpty(details.artist || details.artists);
+        if (singer) details.singer = singer;
+      }
       if (Object.keys(details).length > 0) return details;
     }
     return {};
+  };
+
+  const normaliseCandidate = (candidate) => {
+    if (!isRecord(candidate) || textOrEmpty(candidate.singer)) return candidate;
+    const singer = textOrEmpty(candidate.artist || candidate.artists);
+    return singer ? { ...candidate, singer } : candidate;
   };
 
   /**
@@ -1264,7 +1288,8 @@ const createResolutionCore = () => {
     const candidates = await searchCandidates(source, keyword, requestContext);
 
     const matches = [];
-    for (const candidate of candidates) {
+    for (const rawCandidate of candidates) {
+      const candidate = normaliseCandidate(rawCandidate);
       const score = matchScore(track, candidate);
       if (score <= 0 || !isRecord(candidate)) continue;
       const rawId = candidate[search.candidateIdField];
@@ -1327,7 +1352,9 @@ const createResolutionCore = () => {
               ...candidate,
               ...details,
             };
-            const requireDuration = parseDurationSeconds(track.interval) > 0;
+            // 网易云搜索/详情文档不保证返回时长；QQ 与酷狗候选仍要求时长可校验。
+            const requireDuration =
+              targetSource !== "wy" && parseDurationSeconds(track.interval) > 0;
             if (
               targetSource === "tx" &&
               requireDuration &&
@@ -1421,9 +1448,10 @@ const createResolutionCore = () => {
       );
       return resolution.result;
     } catch (error) {
+      noteChannelFailure(state, source, error);
       const canCrossSearch =
         Boolean(policy.crossPlatform) &&
-        isUnavailableQualityError(error) &&
+        (isUnavailableQualityError(error) || isUpstreamUnavailableError(error)) &&
         Boolean(descriptor.name) &&
         state.config.crossPlatformFallback;
       if (!canCrossSearch) throw error;
@@ -1434,6 +1462,12 @@ const createResolutionCore = () => {
       const platformNames = policy.crossPlatform.sources
         .map((target) => getSourcePolicy(target).name)
         .join("、");
+      if (isUpstreamUnavailableError(error)) {
+        throw pluginError(
+          CROSS_PLATFORM_UNAVAILABLE_ERROR,
+          `${policy.name}无法提供《${descriptor.name}》的播放地址（${error.message}），且在 ${platformNames} 中未匹配到同一首歌。以上是 ChKSz 服务端的返回状态，不代表歌曲不存在，请稍后重试或更换音源。`,
+        );
+      }
       throw pluginError(
         "CHKSZ_TRACK_UNAVAILABLE",
         `${policy.name}无法提供《${descriptor.name}》的播放地址（${error.message}），且在 ${platformNames} 中未匹配到同一首歌。`,
@@ -1476,7 +1510,7 @@ const { requestAction } = resolutionImplementation;
 const resolutionCore = { resolve: resolutionImplementation.resolve };
 
 const resolveUrl = async ({ source, quality, musicInfo }) => {
-  const id = getMusicId(musicInfo);
+  const id = getMusicId(source, musicInfo);
   return resolutionCore.resolve({ source, quality, id, track: musicInfo });
 };
 
@@ -1520,7 +1554,7 @@ const buildActionRequest = (source, action, id) => {
 };
 
 const getLyric = async ({ source, musicInfo }) => {
-  const id = getMusicId(musicInfo);
+  const id = getMusicId(source, musicInfo);
   const body = await requestAction(source, "musicLyric", id);
 
   return {
@@ -1532,7 +1566,7 @@ const getLyric = async ({ source, musicInfo }) => {
 };
 
 const getCover = async ({ source, musicInfo }) => {
-  const id = getMusicId(musicInfo);
+  const id = getMusicId(source, musicInfo);
   const body = await requestAction(source, "musicPic", id);
 
   const cover = extractTextField(body, [
@@ -1579,9 +1613,9 @@ runtimeAdapter.register({
     {
       key: CROSS_PLATFORM_SETTING,
       type: "switch",
-      label: "网易云无版权时改用 QQ 音乐 / 酷狗",
+      label: "主渠道不可用时跨平台兜底",
       description:
-        "网易云在所有音质都没有播放地址时，按歌名、歌手和时长在 QQ 音乐、酷狗中匹配同一首歌。每次匹配会额外消耗 ChKSz 额度。",
+        "当前来源无版权或上游故障时，按歌名、歌手和时长在其他平台匹配同一首歌，再使用目标平台自己的 ID 解析。每次匹配会额外消耗 ChKSz 额度。",
       default: true,
     },
     {

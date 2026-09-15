@@ -4,7 +4,7 @@
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
 [![Plugin](https://img.shields.io/badge/SPlayer--Next-source%20plugin-07c160.svg)](https://github.com/SPlayer-Dev/SPlayer-Next)
 
-> **让 SPlayer-Next 把网易云音乐、QQ 音乐、酷狗音乐的歌放出来 —— 超清母带、Hi-Res、无损、320k，能拿多好拿多好；网易云没版权的歌，自动去别的平台找同一首。**
+> **让 SPlayer-Next 把网易云音乐、QQ 音乐、酷狗音乐的歌放出来 —— 超清母带、Hi-Res、无损、320k，能拿多好拿多好；主渠道不可用时自动去别的平台找同一首。**
 
 一个可导入 [SPlayer-Next](https://github.com/SPlayer-Dev/SPlayer-Next) 的原生 `source` 音源插件，基于 [ChKSz API](https://api.chksz.com/) 解析网易云（`wy`）、QQ 音乐（`tx`）、酷狗（`kg`）三平台的播放地址，并在内置歌词、封面没命中时兜底。
 
@@ -91,15 +91,25 @@ hires → lossless → exhigh → standard → jymaster（母带档兜底）
 
 其它档位全部不可用时仍会回头尝试母带档；想换回母带优先就关掉它。
 
-## 网易云无版权歌曲的跨平台兜底
+## 来源路由与跨平台兜底
 
-当网易云对一首歌在各音质都返回 `404：Music URL not found, song may be unavailable at this quality level` 时，插件进入跨平台兜底：
+SPlayer 的搜索结果会携带来源标识，插件不会根据歌名或 ID 猜平台：
 
-1. 用 `去掉版本标记的歌名 + 第一位歌手` 在 ChKSz 的 QQ 音乐点歌接口搜索（例如《世界末日(Live) 周杰伦》会以《世界末日 周杰伦》搜索，避免版本后缀压低命中率；关键词最长 60 个字符，超出时只保留歌名）；
-2. ChKSz 的 QQ 搜索返回 `404`、`5xx`、网络失败或没有结果时，改用 **QQ 音乐公开搜索接口** 找同一首歌的 `mid`（不经过 ChKSz，不消耗额度），仍按下面的规则匹配；
-3. 在结果中挑选歌名相同、歌手有交集、时长相差不超过 20 秒的候选；
-4. 用候选的 `mid` 交给 ChKSz 按原音质等级解析（同样支持音质降级）；
-5. QQ 音乐没有匹配时，再用同样的规则尝试酷狗（按 `id` 解析）。
+| SPlayer 来源 | `source` | ChKSz 解析接口 | 平台 ID |
+| --- | --- | --- | --- |
+| NCM 网易云 | `wy` | `/api/163_music` | 网易云 `id` |
+| QM QQ 音乐 | `tx` | `/api/qq_music` | QQ `mid` |
+| KG 酷狗 | `kg` | `/api/kugou_music` | 酷狗 `id/hash` |
+
+直接解析优先使用当前平台的精确 ID。ChKSz 文档规定：网易云使用 `id + level`，QQ 使用 `mid + size`，酷狗使用 `id + size`；QQ/酷狗的 `size` 不做别名或自动降级映射，因此音质降级由插件显式完成。详见 [网易云解析](https://api.chksz.com/docs/163_music.html)、[QQ 音乐](https://api.chksz.com/docs/qq_music.html)、[酷狗音乐](https://api.chksz.com/docs/kugou_music.html)。
+
+当主渠道明确表示当前音质不可用，或 ChKSz 返回 `502/503/504` 上游故障时，且 `crossPlatformFallback` 开启，插件会按以下流程兜底：
+
+1. 用去掉版本标记的歌名、第一位歌手和时长信息搜索目标平台；
+2. 网易云搜索读取 `data[].id`，QQ 搜索读取 `list[].mid`，酷狗搜索读取 `list[].id`；
+3. 按歌名、歌手和时长校验候选，避免把 Live、Remix 或其他版本当成原曲；
+4. 使用目标平台自己的 ID 调用对应解析接口，而不是复用原平台 ID；
+5. 所有候选仍受 18 秒总解析时间、8 次跨平台请求和每个平台最多 3 个候选的限制。
 
 候选歌名必须在规范化后相同（忽略大小写、空白和标点）。这里有一个**单向**的宽松匹配：如果**原曲自己的标题带版本标记**（如 `My jealousy (Original ver.)`、`世界末日(Live)`），而候选是干净标题（`My jealousy`），则视为同一首歌；反向不成立——原曲标题干净时，带 `(Live)`、`(Remix)` 等标记的候选仍会被拒绝，避免用别的版本顶替原曲。
 
@@ -107,7 +117,7 @@ hires → lossless → exhigh → standard → jymaster（母带档兜底）
 
 时间与请求预算：整个 `musicUrl` 解析共享约 18 秒；默认跨平台阶段每个平台最多探测 3 个候选，共享最多 8 次 ChKSz 请求和 10 秒。省配额模式将候选上限改为每个平台 1 个、请求上限改为 4 次；缓存命中不计入网络请求数。
 
-> 跨平台能否成功取决于 ChKSz 的 QQ 音乐与酷狗通道是否可用：实测出现过 QQ 音乐搜索接口对**任何关键词**（含官方文档示例）都返回 `404 未找到匹配的歌曲`、酷狗持续返回 `502/503` 的情况，而 QQ 按 `mid` 解析仍然正常。因此插件在 ChKSz 搜索失败时改用 QQ 音乐公开搜索拿 `mid`，再交给 ChKSz 解析；同一平台的 ChKSz 搜索对 3 个不同关键词连续 `404` 会进入 2 分钟搜索冷却，期间直接走公开搜索，不再浪费额度。酷狗没有备用搜索，通道故障时只能等服务端恢复。两条路都失败时插件抛出 `CHKSZ_CROSS_PLATFORM_UNAVAILABLE` 并列出各平台的真实状态，不会把服务端故障伪装成"没搜到这首歌"。
+> 跨平台能否成功取决于目标平台的搜索和解析通道是否可用。QQ 搜索通道故障时插件仍可使用 QQ 音乐公开搜索拿 `mid`；网易云和酷狗搜索则使用 ChKSz 对应接口。若所有目标通道都不可用，插件抛出 `CHKSZ_CROSS_PLATFORM_UNAVAILABLE` 并列出真实状态，不会把服务端故障伪装成"没搜到这首歌"。
 
 ## 省配额配置
 
@@ -118,7 +128,7 @@ hires → lossless → exhigh → standard → jymaster（母带档兜底）
 | 可播放优先（`playableFirst`） | 关闭 | 默认母带优先；打开后先取 `hires`、无损等通用档位，把网易云母带/音效档排到最后 |
 | 省配额模式（`economyMode`） | 关闭 | 只试目标音质与标准音质；跨平台每个平台最多一个候选，总共最多四次实际请求 |
 | 允许为歌词和封面额外请求（`metadataFallback`） | 开启 | 关闭后只返回已有缓存里的歌词和封面，不再为这些动作单独调用接口 |
-| 网易云无版权时改用 QQ 音乐 / 酷狗（`crossPlatformFallback`） | 开启 | 关闭后不搜索替代平台，减少请求但也减少可播放的歌曲 |
+| 主渠道不可用时跨平台兜底（`crossPlatformFallback`） | 开启 | 主渠道无版权、音质不可用或上游故障时，搜索其他平台并用目标平台 ID 解析；关闭后只使用当前来源 |
 | ChKSz 搜索不可用时改用 QQ 音乐公开搜索（`directSearchFallback`） | 开启 | ChKSz 的 QQ 搜索失败或无结果时，用 QQ 音乐公开接口找 `mid` 再交给 ChKSz 解析；不消耗 ChKSz 额度，但依赖第三方公开接口 |
 
 更重视额度时，可打开省配额模式并关闭歌词/封面额外请求。省配额模式会跳过 `hires`、无损等中间探测档位，也可能跳过可播放的后续候选；它是显式取舍，不是"同样效果但保证更省"。
@@ -141,7 +151,7 @@ hires → lossless → exhigh → standard → jymaster（母带档兜底）
 ## 常见问题
 
 **为什么有些歌还是放不出来？**
-三类原因：① 网易云没版权，而 ChKSz 的酷狗通道当前不可用、QQ 音乐公开搜索也没找到同一首歌（插件会明确报 `CHKSZ_CROSS_PLATFORM_UNAVAILABLE` 或 `CHKSZ_TRACK_UNAVAILABLE`）；② 额度受限（返回 `CHKSZ_HTTP_429`，等一分钟再试）；③ 地址本身可拉流、但客户端解码失败——插件拿到的是完全正常的响应，这种情况插件日志不会报错。
+三类原因：① 当前平台没有版权，或目标平台搜索不到同一首歌（插件会明确报 `CHKSZ_CROSS_PLATFORM_UNAVAILABLE` 或 `CHKSZ_TRACK_UNAVAILABLE`）；② 额度受限（返回 `CHKSZ_HTTP_429`，等一分钟再试）；③ 地址本身可拉流、但客户端解码失败——插件拿到的是完全正常的响应，这种情况插件日志不会报错。ChKSz 返回 `502/504` 时表示上游连接失败或超时，插件会尝试其他平台，但所有平台都故障时仍需稍后重试。
 
 **怎么判断一首歌到底有没有经过插件？**
 看 SPlayer 主日志（`app-data/logs/<日期>.log`）里带 `[plugin:chksz.splayer-source]` 的行：解析成功会有一行 `《歌名》已由 ChKSz 网易云解析，交付音质 …`，失败会有 `resolveUrl rejected`。两种都没有，说明官方接口已经给出可用地址、宿主根本没调用插件，此时播放失败与插件无关，请改看 `app-data/logs/native/audio-engine.<日期>.log` 里的解码记录。
@@ -219,7 +229,8 @@ SPlayer 的插件设置保存在本机，修改设置后无需重新导入插件
 - ChKSz 返回的播放地址可能有时效；没有明确到期时间、已过缓存期或关闭智能复用时，重新解析仍需调用 API。
 - 实际接口请求可能消耗 ChKSz 配额，请避免批量预解析；智能复用只能减少重复请求，不能改变服务端计费规则。
 - 跨平台匹配按歌名、歌手和时长判断，仍可能匹配到现场版、翻唱或不同混音；匹配错误时可关闭开关并反馈歌曲 ID。
-- 跨平台依赖 ChKSz 的 QQ 音乐与酷狗通道。QQ 搜索通道故障时插件会改用 QQ 音乐公开搜索，但按 `mid` 解析仍需 ChKSz；酷狗通道整体不可用（`502/503`）时无版权歌曲只能等服务端恢复。
+- 跨平台会保留每个平台自己的 ID：网易云使用 `id`，QQ 使用 `mid`，酷狗使用 `id/hash`，不会把一个平台的 ID 直接发给另一个平台。
+- 跨平台依赖目标平台的搜索与解析通道。QQ 搜索通道故障时插件会改用 QQ 音乐公开搜索，但按 `mid` 解析仍需 ChKSz；任一平台返回 `502/503/504` 时会进入短暂冷却并尝试其他平台。
 - QQ 音乐公开搜索是第三方接口，可能随时变动或限流；它失败时插件退回 ChKSz 的原始错误，不影响其余流程。
 - ChKSz 免费额度实测限制约 20 请求/分钟。连续试听多首无版权歌会触发限流；插件会用限流冷却与通道熔断止损，但仍建议连续失败时等待一分钟再试。
 - 网易云返回的播放地址本身可拉流时，插件不保证其容器与声明一致（实测出现 `Content-Type: audio/mpeg` 的 FLAC）。这类播放失败发生在客户端解码阶段，插件日志不会报错。
@@ -230,7 +241,7 @@ SPlayer 的插件设置保存在本机，修改设置后无需重新导入插件
 需要 Node.js 20 或更高版本。入口是 `src/plugin.js` —— 一个不依赖 npm 包的单文件脚本，便于直接导入 SPlayer-Next。
 
 ```powershell
-npm test          # 97 项测试（Node 内置 test runner + 模拟 splayer 宿主）
+npm test          # Node 内置 test runner + 模拟 splayer 宿主
 npm run build     # 把入口复制为导入产物 dist\chksz.splayer-source.js
 npm run check     # 语法检查
 npm run check:dist / check:artifact   # 源码与产物字节一致 / 产物可加载
@@ -239,7 +250,10 @@ npm run check:dist / check:artifact   # 源码与产物字节一致 / 产物可�
 | 测试文件 | 覆盖 |
 | --- | --- |
 | `test/plugin.test.js` | 请求参数、音质映射、歌词解析、错误处理 |
-| `test/cross-platform.test.js` | 网易云无版权歌曲的跨平台匹配 |
+| `test/cross-platform.test.js` | 三个平台的跨平台匹配、候选校验与配置开关 |
+| `test/source-routing.test.js` | 来源专用 ID 与接口路由 |
+| `test/upstream-fallback.test.js` | 上游故障后的目标平台搜索与重新解析 |
+| `test/compatibility-matrix.test.js` | 三来源 × 五音质、多歌手与上游超时场景 |
 | `test/quota-routing.test.js` | 实际请求数、缓存失效、配置切换、并发复用、省配额模式 |
 | `test/upstream-resilience.test.js` | 429 限流冷却、上游通道熔断、"服务端故障 vs 未匹配" |
 | `test/delivery-probe.test.js` | 交付体检：降级、缓存、关闭、宿主不支持时放行 |
