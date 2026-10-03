@@ -284,7 +284,7 @@ test("keeps an upstream diagnosis when no alternate platform matches", async () 
   const { handlers } = loadPlugin({
     directSearchResponse: {
       status: 200,
-      body: { code: 0, data: { song: { list: [] } } },
+      body: { code: 0, request: { code: 0, data: { body: { item_song: [] } } } },
     },
     response: (url) => {
       if (url.pathname === "/api/kugou_music") {

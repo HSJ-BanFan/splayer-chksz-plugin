@@ -208,12 +208,13 @@ test("does not return old-account results after a key change during an active re
 });
 
 test("an invalid cached cover does not suppress the cover fallback request", async () => {
-  const host = loadPlugin({ response: (url) => success({
-    cover: url.searchParams.get("level") === "standard" ? "https://cdn.example.test/cover.jpg" : "not-a-url",
-  }) });
-  await host.handlers.musicUrl(SONG);
-  assert.equal((await host.handlers.musicPic(SONG)).url, "https://cdn.example.test/cover.jpg");
-  assert.equal(host.requests.length, 2);
+  const host = loadPlugin({ response: success({ cover: "not-a-url" }),
+    directSearchResponse: { status: 200, body: { code: 200, songs: [{ id: 108390, album: { picUrl: "https://cdn.example.test/cover.jpg" } }] } } });
+  const input = { ...SONG, musicInfo: { ...SONG.musicInfo, id: "108390" } };
+  await host.handlers.musicUrl(input);
+  assert.equal((await host.handlers.musicPic(input)).url, "https://cdn.example.test/cover.jpg");
+  assert.equal(host.requests.length, 1);
+  assert.equal(host.directSearches.length, 1);
 });
 
 test("URL caching stops after five minutes even when the provider gives a long expiry", async () => {
@@ -275,15 +276,15 @@ test("cached cross-platform playback still obeys the cross-platform time limit",
 test("missing or invalid metadata never blocks a later fallback with valid fields", async () => {
   for (const source of ["wy", "tx", "kg"]) {
     let valid = false;
-    const host = loadPlugin({ now: () => START, response: () => success({
+    const host = loadPlugin({ directSearchResponse: () => ({ status: 200, body: { code: 200, songs: [{ id: 108390, album: { picUrl: valid ? "https://cdn.example.test/cover.jpg" : "not-a-url" } }] } }), now: () => START, response: () => success({
       expire: START + 120_000,
       cover: valid ? "https://cdn.example.test/cover.jpg" : "not-a-url",
     }) });
-    const input = { ...SONG, source };
+    const input = { ...SONG, source, musicInfo: { ...SONG.musicInfo, id: "108390" } };
     assert.equal((await host.handlers.musicPic(input)).url, "");
     valid = true;
     assert.equal((await host.handlers.musicPic(input)).url, "https://cdn.example.test/cover.jpg");
-    assert.equal(host.requests.length, 2, source);
+    assert.equal(host.requests.length + host.directSearches.length, 2, source);
   }
 });
 

@@ -1,0 +1,270 @@
+{
+  "version": "0.8.1",
+  "baseCommit": "fb1aff1bd044c6d6ce2ca447e41a42d4f92c52df",
+  "sourceSha256": "2784aae63639ff4f98c734339b0e4687378e14ba97595608bdae634a607360b2",
+  "searches": [
+    {
+      "keyword": "说谎 林宥嘉",
+      "http": 200,
+      "outer": 0,
+      "inner": 0,
+      "candidates": [
+        {
+          "name": "说谎",
+          "singer": "林宥嘉",
+          "album": "感官/世界",
+          "interval": 264,
+          "mid": "000W95Fk3lAVxV"
+        },
+        {
+          "name": "说谎 (Live)",
+          "singer": "林宥嘉",
+          "album": "The GREAT YOGA 数位Live 精选",
+          "interval": 296,
+          "mid": "003BZQ9l3d0YbH"
+        }
+      ]
+    },
+    {
+      "keyword": "晴天 周杰伦",
+      "http": 200,
+      "outer": 0,
+      "inner": 0,
+      "candidates": [
+        {
+          "name": "晴天",
+          "singer": "周杰伦",
+          "album": "叶惠美",
+          "interval": 269,
+          "mid": "0039MnYb0qxYhV"
+        },
+        {
+          "name": "晴天 (Live)",
+          "singer": "周杰伦",
+          "album": "周杰伦地表最强世界巡回演唱会",
+          "interval": 249,
+          "mid": "004Fs2FP1EvZYc"
+        }
+      ]
+    },
+    {
+      "keyword": "恋人未满 S.H.E",
+      "http": 200,
+      "outer": 0,
+      "inner": 0,
+      "candidates": [
+        {
+          "name": "恋人未满",
+          "singer": "S.H.E",
+          "album": "女生宿舍",
+          "interval": 277,
+          "mid": "000UO3jv0UcS3m"
+        },
+        {
+          "name": "恋人未满 (Live)",
+          "singer": "S.H.E",
+          "album": "奇幻乐园演唱会",
+          "interval": 276,
+          "mid": "003hVjMC23SoSi"
+        }
+      ]
+    }
+  ],
+  "playback": [
+    {
+      "requested": "hq",
+      "served": "hq",
+      "urlHost": "wx.music.tc.qq.com",
+      "ms": 11860
+    },
+    {
+      "requested": "lossless",
+      "served": "lossless",
+      "urlHost": "wx.music.tc.qq.com",
+      "ms": 15566
+    }
+  ],
+  "requests": [
+    {
+      "endpoint": "https://api.chksz.com/api/163_music",
+      "params": {
+        "id": "108390",
+        "level": "exhigh",
+        "type": "json"
+      },
+      "http": 404,
+      "at": "2026-10-02T15:53:31.036Z",
+      "code": 404,
+      "message": "Music URL not found, song may be unavailable at this quality level",
+      "ms": 1754
+    },
+    {
+      "endpoint": "https://api.chksz.com/api/163_music",
+      "params": {
+        "id": "108390",
+        "level": "standard",
+        "type": "json"
+      },
+      "http": 404,
+      "at": "2026-10-02T15:53:33.356Z",
+      "code": 404,
+      "message": "Music URL not found, song may be unavailable at this quality level",
+      "ms": 570
+    },
+    {
+      "endpoint": "https://api.chksz.com/api/qq_music",
+      "params": {
+        "num": "10",
+        "msg": "说谎 林宥嘉"
+      },
+      "http": 404,
+      "at": "2026-10-02T15:53:37.766Z",
+      "code": 404,
+      "message": "未找到匹配的歌曲",
+      "ms": 1469
+    },
+    {
+      "endpoint": "https://u.y.qq.com/cgi-bin/musicu.fcg",
+      "params": {},
+      "http": 200,
+      "at": "2026-10-02T15:53:38.069Z",
+      "code": 0,
+      "inner": 0,
+      "message": "",
+      "ms": 304
+    },
+    {
+      "endpoint": "https://api.chksz.com/api/qq_music",
+      "params": {
+        "mid": "000W95Fk3lAVxV",
+        "size": "320k",
+        "type": "json"
+      },
+      "http": 200,
+      "at": "2026-10-02T15:53:41.099Z",
+      "code": 200,
+      "message": "success",
+      "name": "说谎",
+      "mid": "000W95Fk3lAVxV",
+      "bitrate": "320k",
+      "ms": 1296
+    },
+    {
+      "endpoint": "https://wx.music.tc.qq.com",
+      "http": 206,
+      "at": "2026-10-02T15:53:41.131Z",
+      "magicHex": "49443303",
+      "contentRange": "bytes 0-3/10569339",
+      "ms": 32
+    },
+    {
+      "endpoint": "https://api.chksz.com/api/163_music",
+      "params": {
+        "id": "108390",
+        "level": "lossless",
+        "type": "json"
+      },
+      "http": 404,
+      "at": "2026-10-02T15:54:47.098Z",
+      "code": 404,
+      "message": "Music URL not found, song may be unavailable at this quality level",
+      "ms": 2279
+    },
+    {
+      "endpoint": "https://api.chksz.com/api/163_music",
+      "params": {
+        "id": "108390",
+        "level": "exhigh",
+        "type": "json"
+      },
+      "http": 404,
+      "at": "2026-10-02T15:54:48.798Z",
+      "code": 404,
+      "message": "Music URL not found, song may be unavailable at this quality level",
+      "ms": 469
+    },
+    {
+      "endpoint": "https://api.chksz.com/api/163_music",
+      "params": {
+        "id": "108390",
+        "level": "standard",
+        "type": "json"
+      },
+      "http": 404,
+      "at": "2026-10-02T15:54:52.288Z",
+      "code": 404,
+      "message": "Music URL not found, song may be unavailable at this quality level",
+      "ms": 454
+    },
+    {
+      "endpoint": "https://api.chksz.com/api/qq_music",
+      "params": {
+        "num": "10",
+        "msg": "说谎 林宥嘉"
+      },
+      "http": 404,
+      "at": "2026-10-02T15:54:55.847Z",
+      "code": 404,
+      "message": "未找到匹配的歌曲",
+      "ms": 510
+    },
+    {
+      "endpoint": "https://u.y.qq.com/cgi-bin/musicu.fcg",
+      "params": {},
+      "http": 200,
+      "at": "2026-10-02T15:54:56.119Z",
+      "code": 0,
+      "inner": 0,
+      "message": "",
+      "ms": 273
+    },
+    {
+      "endpoint": "https://api.chksz.com/api/qq_music",
+      "params": {
+        "mid": "000W95Fk3lAVxV",
+        "size": "flac",
+        "type": "json"
+      },
+      "http": 200,
+      "at": "2026-10-02T15:55:00.348Z",
+      "code": 200,
+      "message": "success",
+      "name": "说谎",
+      "mid": "000W95Fk3lAVxV",
+      "bitrate": "flac",
+      "ms": 1497
+    },
+    {
+      "endpoint": "https://wx.music.tc.qq.com",
+      "http": 206,
+      "at": "2026-10-02T15:55:00.381Z",
+      "magicHex": "664c6143",
+      "contentRange": "bytes 0-3/27974692",
+      "ms": 33
+    }
+  ],
+  "logs": [
+    {
+      "level": "info",
+      "message": "ChKSz QQ 音乐搜索失败（ChKSz 请求失败（HTTP 404）：未找到匹配的歌曲），QQ 音乐公开搜索返回 10 个候选。"
+    },
+    {
+      "level": "info",
+      "message": "《说谎》在ChKSz 网易云不可用，已改用 ChKSz QQ 音乐 播放（000W95Fk3lAVxV）。"
+    },
+    {
+      "level": "info",
+      "message": "ChKSz QQ 音乐搜索失败（ChKSz 请求失败（HTTP 404）：未找到匹配的歌曲），QQ 音乐公开搜索返回 10 个候选。"
+    },
+    {
+      "level": "info",
+      "message": "《说谎》在ChKSz 网易云不可用，已改用 ChKSz QQ 音乐 播放（000W95Fk3lAVxV）。"
+    }
+  ],
+  "counts": {
+    "chksz": 9,
+    "qqPublic": 5,
+    "range": 2,
+    "rateLimited": 0
+  }
+}

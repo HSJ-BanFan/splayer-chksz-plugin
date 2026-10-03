@@ -34,9 +34,8 @@ test("source policies own provider identity and action request strategies", () =
   assert.equal(sourcePolicies.kg.playback.endpoint, "/api/kugou_music");
   assert.equal(sourcePolicies.kg.playback.qualityValues["hi-res"], "master");
   assert.equal(sourcePolicies.wy.actions.musicLyric.endpoint, "/api/163_lyric");
-  assert.equal(sourcePolicies.wy.actions.musicPic.endpoint, "/api/163_music");
-  assert.equal(sourcePolicies.wy.actions.musicPic.params.level, "standard");
-  assert.equal(sourcePolicies.wy.actions.musicPic.params.type, "json");
+  assert.equal(sourcePolicies.wy.actions.musicPic.endpoint, "https://music.163.com/api/song/detail/");
+  assert.equal(sourcePolicies.wy.actions.musicPic.request, "songMetadata");
   assert.equal(sourcePolicies.tx.actions.musicLyric.request, "trackDetails");
   assert.equal(sourcePolicies.tx.actions.musicPic.request, "trackDetails");
   assert.equal(sourcePolicies.kg.actions.musicLyric.request, "trackDetails");
@@ -612,29 +611,30 @@ test("uses shared track-detail requests for QQ and Kugou lyrics", async () => {
 });
 
 test("uses policy-defined cover requests for all providers", async () => {
-  const { handlers, requests } = loadPlugin({
+  const { handlers, requests, directSearches } = loadPlugin({
+    directSearchResponse: { status: 200, body: { code: 200, songs: [{ id: 108390, album: { picUrl: "https://cdn.example.test/cover.jpg" } }] } },
     response: { status: 200, body: { cover: "https://cdn.example.test/cover.jpg" } },
   });
 
-  await handlers.musicPic({ source: "wy", musicInfo: { id: "wy-id-1" } });
+  await handlers.musicPic({ source: "wy", musicInfo: { id: "108390" } });
   await handlers.musicPic({ source: "tx", musicInfo: { songmid: "qq-mid-1" } });
   await handlers.musicPic({ source: "kg", musicInfo: { id: "kg-id-1" } });
 
-  const neteaseUrl = new URL(requests[0].url);
-  assert.equal(neteaseUrl.pathname, "/api/163_music");
-  assert.equal(neteaseUrl.searchParams.get("id"), "wy-id-1");
-  assert.equal(neteaseUrl.searchParams.get("level"), "standard");
-  assert.equal(neteaseUrl.searchParams.get("type"), "json");
-  assert.equal(neteaseUrl.searchParams.get("apikey"), "chksz_test_key");
+  const neteaseUrl = new URL(directSearches[0].url);
+  assert.equal(neteaseUrl.pathname, "/api/song/detail/");
+  assert.equal(neteaseUrl.searchParams.get("id"), "108390");
+  assert.equal(neteaseUrl.searchParams.get("level"), null);
+  assert.equal(neteaseUrl.searchParams.get("type"), null);
+  assert.equal(neteaseUrl.searchParams.get("apikey"), null);
 
-  const qqUrl = new URL(requests[1].url);
+  const qqUrl = new URL(requests[0].url);
   assert.equal(qqUrl.pathname, "/api/qq_music");
   assert.equal(qqUrl.searchParams.get("mid"), "qq-mid-1");
   assert.equal(qqUrl.searchParams.get("size"), "128k");
   assert.equal(qqUrl.searchParams.get("type"), "json");
   assert.equal(qqUrl.searchParams.get("apikey"), "chksz_test_key");
 
-  const kugouUrl = new URL(requests[2].url);
+  const kugouUrl = new URL(requests[1].url);
   assert.equal(kugouUrl.pathname, "/api/kugou_music");
   assert.equal(kugouUrl.searchParams.get("id"), "kg-id-1");
   assert.equal(kugouUrl.searchParams.get("size"), "128k");

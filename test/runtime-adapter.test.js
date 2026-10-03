@@ -21,7 +21,7 @@ test("VM host accepts explicit source text for alternate runtime scripts", () =>
   assert.equal(handlers.musicUrl(), "custom-handler");
 });
 
-test("runtime adapter delegates supplied metadata and the three public actions", () => {
+test("runtime adapter delegates supplied metadata and the four public actions", () => {
   const { createRuntimeAdapter } = loadPlugin({
     response: { status: 200, body: {} },
   });
@@ -39,6 +39,7 @@ test("runtime adapter delegates supplied metadata and the three public actions",
     musicUrl: () => "url",
     musicLyric: () => "lyric",
     musicPic: () => "pic",
+    musicSearch: () => "search",
   };
   const metadata = { sources: { custom: {} }, settings: [{ key: "custom" }] };
 
@@ -48,11 +49,11 @@ test("runtime adapter delegates supplied metadata and the three public actions",
   assert.deepEqual(registrations, [metadata]);
   assert.deepEqual(
     bindings.map(([action]) => action),
-    ["musicUrl", "musicLyric", "musicPic"],
+    ["musicUrl", "musicLyric", "musicPic", "musicSearch"],
   );
   assert.deepEqual(
     bindings.map(([, handler]) => handler()),
-    ["url", "lyric", "pic"],
+    ["url", "lyric", "pic", "search"],
   );
 });
 
@@ -62,15 +63,15 @@ test("registers all three SPlayer platform sources and a local key setting", () 
   assert.deepEqual(Object.keys(registration.sources), ["wy", "tx", "kg"]);
   assert.deepEqual(
     [...registration.sources.wy.actions],
-    ["musicUrl", "musicLyric", "musicPic"],
+    ["musicUrl", "musicLyric", "musicPic", "musicSearch"],
   );
   assert.deepEqual(
     [...registration.sources.tx.actions],
-    ["musicUrl", "musicLyric", "musicPic"],
+    ["musicUrl", "musicLyric", "musicPic", "musicSearch"],
   );
   assert.deepEqual(
     [...registration.sources.kg.actions],
-    ["musicUrl", "musicLyric", "musicPic"],
+    ["musicUrl", "musicLyric", "musicPic", "musicSearch"],
   );
   assert.deepEqual(
     [...registration.sources.wy.qualities],

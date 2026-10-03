@@ -166,6 +166,7 @@ test("reports an upstream outage instead of claiming the song does not exist", a
 
 test("keeps the dedicated no-match error when every platform answered without a candidate", async () => {
   const host = loadPlugin({
+    directSearchResponse: { status: 200, body: { code: 0, request: { code: 0, data: { body: { item_song: [] } } } } },
     response: (url) => (url.pathname === "/api/163_music" ? UNAVAILABLE : EMPTY_SEARCH),
   });
 
@@ -180,6 +181,7 @@ test("remembers a song without any playable primary quality and skips the ladder
   let time = START;
   const host = loadPlugin({
     now: () => time,
+    directSearchResponse: { status: 200, body: { code: 0, request: { code: 0, data: { body: { item_song: [] } } } } },
     response: (url) => (url.pathname === "/api/163_music" ? UNAVAILABLE : EMPTY_SEARCH),
   });
   const originRequests = () =>

@@ -325,6 +325,7 @@ test("prefers an exact title over a live or remix variant listed first", async (
 
 test("reports a dedicated error when no platform carries the song", async () => {
   const { handlers, requests } = loadPlugin({
+    directSearchResponse: { status: 200, body: { code: 0, request: { code: 0, data: { body: { item_song: [] } } } } },
     response: (url) =>
       url.pathname === "/api/163_music"
         ? UNAVAILABLE

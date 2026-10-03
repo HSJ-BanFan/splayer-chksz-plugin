@@ -11,3 +11,7 @@ Uses the default canonical labels: `needs-triage`, `needs-info`, `ready-for-agen
 ### Domain docs
 
 Single-context layout using root `CONTEXT.md` and `docs/adr/`. See `docs/agents/domain.md`.
+
+### Real-app playback debugging
+
+For installed SPlayer playback validation, local MCP calls, or native audio/metadata warning diagnosis, read `.agents/skills/splayer-mcp-debug/SKILL.md` before testing. Distinguish plugin URL resolution from application decoding and full-track playback.

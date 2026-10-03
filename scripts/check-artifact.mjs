@@ -20,7 +20,7 @@ try {
       body: { url: "https://cdn.example.test/release-seam.mp3" },
     },
   });
-  const actions = ["musicUrl", "musicLyric", "musicPic"];
+  const actions = ["musicUrl", "musicLyric", "musicPic", "musicSearch"];
   const qualities = ["lq", "sq", "hq", "lossless", "hi-res"];
 
   assert.deepEqual(Object.keys(registration.sources), ["wy", "tx", "kg"]);
