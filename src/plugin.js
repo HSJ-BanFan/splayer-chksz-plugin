@@ -382,6 +382,103 @@ const buildTrackParams = (source, id, quality, nativeQualityOverride) => {
   };
 };
 
+const normaliseText = (value) =>
+  String(value ?? "")
+    .toLowerCase()
+    .replace(/[\s\p{P}\p{S}]+/gu, "");
+
+const splitArtists = (value) =>
+  String(value ?? "").split(ARTIST_SEPARATOR).map(normaliseText).filter(Boolean);
+
+const exactlyEqual = (a, b) => Boolean(a) && Boolean(b) && a === b;
+
+const parseDurationSeconds = (value) => {
+  if (typeof value === "number") {
+    if (!Number.isFinite(value) || value <= 0) return 0;
+    // Values this large can only be milliseconds.
+    return value >= 36_000 ? value / 1000 : value;
+  }
+  const text = textOrEmpty(value);
+  const clock = /^(\d{1,3}):(\d{2})$/.exec(text);
+  if (clock) return Number(clock[1]) * 60 + Number(clock[2]);
+  return parseDurationSeconds(Number(text));
+};
+
+/** 只有"原曲自带版本标记、候选是干净标题"时才允许宽松匹配。 */
+const isVariantFallback = (wantedTitle, candidateTitle) => {
+  const wanted = textOrEmpty(wantedTitle);
+  const candidate = textOrEmpty(candidateTitle);
+  const wantedBase = stripTitleVariant(wanted);
+  const candidateBase = stripTitleVariant(candidate);
+  // 原曲本身没有版本标记，说明它就是规范版本，不接受别的版本顶替。
+  if (normaliseText(wantedBase) === normaliseText(wanted)) return false;
+  // 候选自己也带版本标记时必须走精确匹配，否则会拿另一个变体冒充。
+  if (normaliseText(candidateBase) !== normaliseText(candidate)) return false;
+  return exactlyEqual(normaliseText(wantedBase), normaliseText(candidateBase));
+};
+
+/** 0 = different song, 2 = exact normalised title, 1 = relaxed title match. */
+const matchScore = (
+  track,
+  candidate,
+  { requireDuration = false, requireDurationForRelaxed = false } = {},
+) => {
+  if (!isRecord(candidate)) return 0;
+  const wantedName = normaliseText(track.name);
+  const candidateName = normaliseText(candidate.name);
+  const exact = exactlyEqual(wantedName, candidateName);
+  const relaxed = !exact && isVariantFallback(track.name, candidate.name);
+  if (!exact && !relaxed) return 0;
+
+  const wantedArtists = splitArtists(track.singer);
+  const candidateArtists = splitArtists(candidate.singer);
+  if (
+    wantedArtists.length &&
+    (!candidateArtists.length ||
+      !wantedArtists.some((artist) =>
+        candidateArtists.some((other) => exactlyEqual(artist, other)),
+      ))
+  ) {
+    return 0;
+  }
+
+  const wantedSeconds = parseDurationSeconds(track.interval);
+  const candidateSeconds = parseDurationSeconds(
+    candidate.interval ?? candidate.duration,
+  );
+  if (requireDuration && wantedSeconds && !candidateSeconds) return 0;
+  if (requireDurationForRelaxed && relaxed && wantedSeconds && !candidateSeconds) return 0;
+  if (
+    wantedSeconds &&
+    candidateSeconds &&
+    Math.abs(wantedSeconds - candidateSeconds) > DURATION_TOLERANCE_SECONDS
+  ) {
+    return 0;
+  }
+
+  return exact ? 2 : 1;
+};
+
+/**
+ * 搜索关键词：去掉版本标记的标题 + 第一位歌手。把 "(Live)"、"My jealousy (Original ver.)" 这类后缀
+ * 直接丢给搜索接口会显著降低命中率；酷狗对过长的 msg 返回 400，因此统一截断。
+ */
+const buildSearchKeyword = (track) => {
+  const primaryArtist = track.singer.split(ARTIST_SEPARATOR)[0].trim();
+  const title = stripTitleVariant(track.name).slice(0, SEARCH_KEYWORD_MAX_LENGTH).trim();
+  const keyword = [title, primaryArtist].filter(Boolean).join(" ");
+  return keyword.length > SEARCH_KEYWORD_MAX_LENGTH ? title : keyword;
+};
+
+const createTrackMatcher = () => ({
+  descriptor: getTrackDescriptor,
+  keyword: buildSearchKeyword,
+  stripTitleVariant,
+  score: matchScore,
+});
+
+const trackMatcher = createTrackMatcher();
+
 const createResolutionCore = () => {
   let session;
   const enabledSetting = (key, fallback) => {
@@ -1122,83 +1219,6 @@ const createResolutionCore = () => {
     return { result, body };
   };
 
-  const normaliseText = (value) =>
-    String(value ?? "")
-      .toLowerCase()
-      .replace(/[\s\p{P}\p{S}]+/gu, "");
-
-  const splitArtists = (value) =>
-    String(value ?? "").split(ARTIST_SEPARATOR).map(normaliseText).filter(Boolean);
-
-  const exactlyEqual = (a, b) => Boolean(a) && Boolean(b) && a === b;
-
-  const parseDurationSeconds = (value) => {
-    if (typeof value === "number") {
-      if (!Number.isFinite(value) || value <= 0) return 0;
-      // Values this large can only be milliseconds.
-      return value >= 36_000 ? value / 1000 : value;
-    }
-    const text = textOrEmpty(value);
-    const clock = /^(\d{1,3}):(\d{2})$/.exec(text);
-    if (clock) return Number(clock[1]) * 60 + Number(clock[2]);
-    return parseDurationSeconds(Number(text));
-  };
-
-  /** 只有"原曲自带版本标记、候选是干净标题"时才允许宽松匹配。 */
-  const isVariantFallback = (wantedTitle, candidateTitle) => {
-    const wanted = textOrEmpty(wantedTitle);
-    const candidate = textOrEmpty(candidateTitle);
-    const wantedBase = stripTitleVariant(wanted);
-    const candidateBase = stripTitleVariant(candidate);
-    // 原曲本身没有版本标记，说明它就是规范版本，不接受别的版本顶替。
-    if (normaliseText(wantedBase) === normaliseText(wanted)) return false;
-    // 候选自己也带版本标记时必须走精确匹配，否则会拿另一个变体冒充。
-    if (normaliseText(candidateBase) !== normaliseText(candidate)) return false;
-    return exactlyEqual(normaliseText(wantedBase), normaliseText(candidateBase));
-  };
-
-  /** 0 = different song, 2 = exact normalised title, 1 = relaxed title match. */
-  const matchScore = (
-    track,
-    candidate,
-    { requireDuration = false, requireDurationForRelaxed = false } = {},
-  ) => {
-    if (!isRecord(candidate)) return 0;
-    const wantedName = normaliseText(track.name);
-    const candidateName = normaliseText(candidate.name);
-    const exact = exactlyEqual(wantedName, candidateName);
-    const relaxed = !exact && isVariantFallback(track.name, candidate.name);
-    if (!exact && !relaxed) return 0;
-
-    const wantedArtists = splitArtists(track.singer);
-    const candidateArtists = splitArtists(candidate.singer);
-    if (
-      wantedArtists.length &&
-      (!candidateArtists.length ||
-        !wantedArtists.some((artist) =>
-          candidateArtists.some((other) => exactlyEqual(artist, other)),
-        ))
-    ) {
-      return 0;
-    }
-
-    const wantedSeconds = parseDurationSeconds(track.interval);
-    const candidateSeconds = parseDurationSeconds(
-      candidate.interval ?? candidate.duration,
-    );
-    if (requireDuration && wantedSeconds && !candidateSeconds) return 0;
-    if (requireDurationForRelaxed && relaxed && wantedSeconds && !candidateSeconds) return 0;
-    if (
-      wantedSeconds &&
-      candidateSeconds &&
-      Math.abs(wantedSeconds - candidateSeconds) > DURATION_TOLERANCE_SECONDS
-    ) {
-      return 0;
-    }
-
-    return exact ? 2 : 1;
-  };
-
   const extractCandidates = (body) => {
     for (const container of [body, body?.data, body?.result]) {
       if (Array.isArray(container)) return container;
@@ -1229,17 +1249,6 @@ const createResolutionCore = () => {
     if (!isRecord(candidate) || textOrEmpty(candidate.singer)) return candidate;
     const singer = textOrEmpty(candidate.artist || candidate.artists);
     return singer ? { ...candidate, singer } : candidate;
-  };
-
-  /**
-   * 搜索关键词：去掉版本标记的标题 + 第一位歌手。把 "(Live)"、"My jealousy (Original ver.)" 这类后缀
-   * 直接丢给搜索接口会显著降低命中率；酷狗对过长的 msg 返回 400，因此统一截断。
-   */
-  const buildSearchKeyword = (track) => {
-    const primaryArtist = track.singer.split(ARTIST_SEPARATOR)[0].trim();
-    const title = stripTitleVariant(track.name).slice(0, SEARCH_KEYWORD_MAX_LENGTH).trim();
-    const keyword = [title, primaryArtist].filter(Boolean).join(" ");
-    return keyword.length > SEARCH_KEYWORD_MAX_LENGTH ? title : keyword;
   };
 
   // 公开搜索接口偶尔用 JSONP 包裹；宿主按 json 解析失败时会原样给字符串。
@@ -1413,13 +1422,13 @@ const createResolutionCore = () => {
     matchOptions = {},
   ) => {
     const { search } = getSourcePolicy(source);
-    const keyword = buildSearchKeyword(track);
+    const keyword = trackMatcher.keyword(track);
     const candidates = await searchCandidates(source, keyword, requestContext);
 
     const matches = [];
     for (const rawCandidate of candidates) {
       const candidate = normaliseCandidate(rawCandidate);
-      const score = matchScore(track, candidate, matchOptions);
+      const score = trackMatcher.score(track, candidate, matchOptions);
       if (score <= 0 || !isRecord(candidate)) continue;
       const rawId = candidate[search.candidateIdField];
       const id = typeof rawId === "number" ? String(rawId) : textOrEmpty(rawId);
@@ -1507,7 +1516,7 @@ const createResolutionCore = () => {
               );
               continue;
             }
-            if (matchScore(track, resolvedCandidate, matchOptions) <= 0) {
+            if (trackMatcher.score(track, resolvedCandidate, matchOptions) <= 0) {
               splayer.log.warn(
                 `${targetPolicy.name} 候选（${id}）未通过《${track.name}》的时长校验。`,
               );
@@ -1884,7 +1893,7 @@ const createResolutionCore = () => {
     if (!title) return [];
     const candidates = await jianbinSearchByType(searchType, "name", title, state, ctx);
     // 煎饼候选没有时长字段，无法证明宽松版本匹配的等价性，只接受规范标题严格相等。
-    return candidates.filter((candidate) => matchScore(track, candidate) === 2);
+    return candidates.filter((candidate) => trackMatcher.score(track, candidate) === 2);
   };
 
   const resolveJianbinCandidates = async (candidates, searchType, state, ctx) => {
@@ -2022,7 +2031,7 @@ const createResolutionCore = () => {
 
   const resolveUncached = async ({ source, quality, id, track }, state) => {
     const { policy } = buildTrackParams(source, id, quality);
-    const descriptor = getTrackDescriptor(track);
+    const descriptor = trackMatcher.descriptor(track);
     const deadline = Date.now() + RESOLUTION_TIME_BUDGET;
     const canCrossSearch =
       Boolean(policy.crossPlatform) &&
@@ -2102,7 +2111,7 @@ const createResolutionCore = () => {
   const resolve = async (input) => {
     const state = getSession();
     const { requestedQuality } = buildTrackParams(input.source, input.id, input.quality);
-    const key = JSON.stringify([input.source, String(input.id), requestedQuality, getTrackDescriptor(input.track)]);
+    const key = JSON.stringify([input.source, String(input.id), requestedQuality, trackMatcher.descriptor(input.track)]);
     const result = await sharePending(state, state.pending, key, () => resolveUncached(input, state));
     assertCurrentSession(state);
     return { ...result };
