@@ -757,18 +757,6 @@ const writeJianbinCached = (state, searchType, songid, resolution) => {
   );
 };
 
-const createJianbinContext = (state, deadline) => ({
-  state,
-  deadline,
-  stageDeadline: deadline,
-  budget: {
-    remaining: state.config.economyMode ? 3 : JIANBIN_REQUEST_BUDGET,
-    deadline,
-  },
-  forbiddenRetried: false,
-  attempted: false,
-});
-
 const isJianbinBudgetError = (error) => error?.code === JIANBIN_BUDGET_EXHAUSTED_ERROR;
 
 const isJianbinForbidden = (error) =>
@@ -1084,9 +1072,7 @@ const resolveJianbinCandidates = async (candidates, searchType, state, ctx) => {
       ) {
         throw error;
       }
-      splayer.log.warn(
-        `煎饼候选（${candidate.songid}）不可用：${redactSensitiveData(error?.message ?? error)}`,
-      );
+        logFallbackCandidateFailure(jianbinProvider, candidate.songid, error);
     }
   }
   return null;
@@ -1144,7 +1130,6 @@ const jianbinProvider = {
     return Boolean(state.config.crossPlatformFallback) && Boolean(textOrEmpty(task.track?.name));
   },
   createState: createJianbinState,
-  // 煎饼兜底失败按服务级/候选级吸收；终止错误（取消、总超时、限额、账户）原样抛出。
   async attempt(task, ctx) {
     const { state } = ctx;
     const policy = JIANBIN_POLICIES[task.source];
@@ -1158,28 +1143,69 @@ const jianbinProvider = {
       return null;
     }
     ctx.attempted = true;
-    try {
-      const result = task.stage === "same"
-        ? await resolveJianbinSameType(policy, task.track, task.id, state, ctx)
-        : await resolveJianbinCrossType(policy, task.track, state, ctx);
-      if (result) {
-        splayer.log.info(
-          `《${textOrEmpty(task.track.name) || task.id}》已由煎饼免费源解析（来源 ${task.source}），交付音质 ${result.quality}。`,
-        );
-      }
-      return result;
-    } catch (error) {
-      if (classifyJianbinError(error) === "terminal") throw error;
-      noteJianbinFailure(state, error);
-      splayer.log.warn(`煎饼免费源兜底失败：${redactSensitiveData(error?.message ?? error)}`);
-      return null;
+    const result = task.stage === "same"
+      ? await resolveJianbinSameType(policy, task.track, task.id, state, ctx)
+      : await resolveJianbinCrossType(policy, task.track, state, ctx);
+    if (result) {
+      splayer.log.info(
+        `《${textOrEmpty(task.track.name) || task.id}》已由煎饼免费源解析（来源 ${task.source}），交付音质 ${result.quality}。`,
+      );
     }
+    return result;
   },
   classify: classifyJianbinError,
   noteFailure: noteJianbinFailure,
 };
 
 const fallbackProviders = [jianbinProvider];
+
+// same/cross 两个阶段共享同一份预算与截止时间；预算沿用煎饼通道的请求上限。
+const createFallbackContext = (state, deadline) => ({
+  state,
+  deadline,
+  stageDeadline: deadline,
+  budget: {
+    remaining: state.config.economyMode ? 3 : JIANBIN_REQUEST_BUDGET,
+    deadline,
+  },
+  forbiddenRetried: false,
+  attempted: false,
+});
+
+// 候选级失败只告警不冷却：同一个 provider 的下一个候选照常尝试。
+const logFallbackCandidateFailure = (provider, candidateId, error) =>
+  splayer.log.warn(
+    `${provider.name}候选（${candidateId}）不可用：${redactSensitiveData(error?.message ?? error)}`,
+  );
+
+/**
+ * 兜底阶段调度：按注册顺序取支持该阶段的 provider，返回第一个可用结果。
+ * provider 抛错的分类由自己声明，协调器只认 terminal/service/candidate 三类。
+ */
+const runFallbackStage = async (stage, task, ctx) => {
+  for (const provider of fallbackProviders) {
+    if (!provider.stages.includes(stage)) continue;
+    const providerTask = { stage, ...task };
+    if (!provider.enabled(ctx.state, providerTask)) continue;
+    try {
+      const result = await provider.attempt(providerTask, ctx);
+      if (result) return result;
+    } catch (error) {
+      const kind = provider.classify(error);
+      if (kind === "terminal") throw error;
+      if (kind === "service") {
+        provider.noteFailure(ctx.state, error);
+        splayer.log.warn(
+          `${provider.name}免费源兜底失败：${redactSensitiveData(error?.message ?? error)}`,
+        );
+      } else if (kind === "candidate") {
+        // provider 自己抛候选级失败时在 error.candidateId 上带候选 ID。
+        logFallbackCandidateFailure(provider, error?.candidateId, error);
+      }
+    }
+  }
+  return null;
+};
 
 
 const createResolutionCore = () => {
@@ -2048,7 +2074,7 @@ const createResolutionCore = () => {
     deadline,
     state,
     primaryError,
-    jianbinContext,
+    fallbackContext,
   ) => {
     let fallback = null;
     let crossError = null;
@@ -2059,13 +2085,12 @@ const createResolutionCore = () => {
       crossError = error;
     }
     if (fallback) return { result: fallback };
-    if (jianbinContext) {
-      const jianbinResult = await jianbinProvider.attempt(
-        { stage: "cross", source, track, id: "" },
-        jianbinContext,
-      );
-      if (jianbinResult) return { result: jianbinResult };
-    }
+    const fallbackResult = await runFallbackStage(
+      "cross",
+      { source, track, id: "" },
+      fallbackContext,
+    );
+    if (fallbackResult) return { result: fallbackResult };
     return { error: crossError };
   };
 
@@ -2077,8 +2102,8 @@ const createResolutionCore = () => {
       Boolean(policy.crossPlatform) &&
       Boolean(descriptor.name) &&
       state.config.crossPlatformFallback;
-    const jianbinTask = { stage: "same", source, track: descriptor, id };
-    const jianbinEnabled = jianbinProvider.enabled(state, jianbinTask);
+    const fallbackTask = { source, track: descriptor, id };
+    const fallbackContext = createFallbackContext(state, deadline);
 
     const primaryCooldownSeconds = coolingDownChannel(state, source);
     if (primaryCooldownSeconds > 0) {
@@ -2086,15 +2111,12 @@ const createResolutionCore = () => {
         CHANNEL_COOLDOWN_ERROR,
         `${policy.name}上游通道冷却中（还剩 ${primaryCooldownSeconds} 秒），跳过本次主渠道请求。`,
       );
-      const jianbinContext = jianbinEnabled ? createJianbinContext(state, deadline) : null;
-      if (jianbinContext) {
-        const jianbinResult = await jianbinProvider.attempt(jianbinTask, jianbinContext);
-        if (jianbinResult) return jianbinResult;
-      }
-      if (!canCrossSearch) throw appendJianbinNote(cooldownError, jianbinContext);
+      const sameStageResult = await runFallbackStage("same", fallbackTask, fallbackContext);
+      if (sameStageResult) return sameStageResult;
+      if (!canCrossSearch) throw appendJianbinNote(cooldownError, fallbackContext);
 
       const cross = await resolveCrossFallback(
-        source, policy, quality, descriptor, deadline, state, cooldownError, jianbinContext,
+        source, policy, quality, descriptor, deadline, state, cooldownError, fallbackContext,
       );
       if (cross.result) return cross.result;
       throw appendJianbinNote(
@@ -2102,7 +2124,7 @@ const createResolutionCore = () => {
           CROSS_PLATFORM_UNAVAILABLE_ERROR,
           `${cooldownError.message}且在其他平台中未匹配到《${descriptor.name}》。请稍后重试或更换音源。`,
         ),
-        jianbinContext,
+        fallbackContext,
       );
     }
 
@@ -2116,22 +2138,17 @@ const createResolutionCore = () => {
     } catch (error) {
       noteChannelFailure(state, source, error);
       const recoverable = isUnavailableQualityError(error) || isUpstreamUnavailableError(error);
-      const canCrossSearchAfterFailure = canCrossSearch && recoverable;
-      const canJianbinAfterFailure = jianbinEnabled && recoverable;
-      if (!canCrossSearchAfterFailure && !canJianbinAfterFailure) throw error;
+      if (!recoverable) throw error;
 
-      const jianbinContext = canJianbinAfterFailure ? createJianbinContext(state, deadline) : null;
-      if (jianbinContext) {
-        const jianbinResult = await jianbinProvider.attempt(jianbinTask, jianbinContext);
-        if (jianbinResult) return jianbinResult;
-      }
-      if (!canCrossSearchAfterFailure) throw appendJianbinNote(error, jianbinContext);
+      const sameStageResult = await runFallbackStage("same", fallbackTask, fallbackContext);
+      if (sameStageResult) return sameStageResult;
+      if (!canCrossSearch) throw appendJianbinNote(error, fallbackContext);
 
       const cross = await resolveCrossFallback(
-        source, policy, quality, descriptor, deadline, state, error, jianbinContext,
+        source, policy, quality, descriptor, deadline, state, error, fallbackContext,
       );
       if (cross.result) return cross.result;
-      if (cross.error) throw appendJianbinNote(cross.error, jianbinContext);
+      if (cross.error) throw appendJianbinNote(cross.error, fallbackContext);
 
       const platformNames = policy.crossPlatform.sources
         .map((target) => getSourcePolicy(target).name)
@@ -2140,12 +2157,12 @@ const createResolutionCore = () => {
         throw appendJianbinNote(pluginError(
           CROSS_PLATFORM_UNAVAILABLE_ERROR,
           `${policy.name}无法提供《${descriptor.name}》的播放地址（${error.message}），且在 ${platformNames} 中未匹配到同一首歌。以上是各搜索或解析通道的状态，不代表歌曲不存在，请稍后重试或更换音源。`,
-        ), jianbinContext);
+        ), fallbackContext);
       }
       throw appendJianbinNote(pluginError(
         "CHKSZ_TRACK_UNAVAILABLE",
         `${policy.name}无法提供《${descriptor.name}》的播放地址（${error.message}），且在 ${platformNames} 中未匹配到同一首歌。`,
-      ), jianbinContext);
+      ), fallbackContext);
     }
   };
 

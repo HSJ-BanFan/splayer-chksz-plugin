@@ -305,6 +305,7 @@ npm run check:dist / check:artifact   # 源码与产物字节一致 / 产物可�
 | `test/direct-search.test.js` | Lite 请求和候选校验、三类冷却隔离、缓存、取消与超时、Key 脱敏 |
 | `test/delivery-probe.test.js` | 交付体检：降级、缓存、关闭、宿主不支持时放行 |
 | `test/jianbin-fallback.test.js` | 煎饼免费兜底：ID 直查、跨类型严格匹配、mk_visit 续签、预算与冷却 |
+| `test/fallback-coordinator.test.js` | 兜底阶段调度：provider 注册顺序、启用开关、结果采纳与三类失败分流 |
 
 ## 发布到 SPlayer 插件市场
 

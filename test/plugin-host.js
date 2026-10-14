@@ -100,7 +100,8 @@ export const loadPlugin = ({
     `${sourceText}
 ;globalThis.__createRuntimeAdapter = typeof createRuntimeAdapter === "undefined" ? undefined : createRuntimeAdapter;
 ;globalThis.__resolutionCore = typeof resolutionCore === "undefined" ? undefined : resolutionCore;
-;globalThis.__sourcePolicies = typeof SOURCE_POLICIES === "undefined" ? undefined : SOURCE_POLICIES;`,
+;globalThis.__sourcePolicies = typeof SOURCE_POLICIES === "undefined" ? undefined : SOURCE_POLICIES;
+;globalThis.__fallbackProviders = typeof fallbackProviders === "undefined" ? undefined : fallbackProviders;`,
     context,
   );
 
@@ -117,5 +118,6 @@ export const loadPlugin = ({
     resolutionCore: context.__resolutionCore,
     sourcePolicies: context.__sourcePolicies,
     createRuntimeAdapter: context.__createRuntimeAdapter,
+    fallbackProviders: context.__fallbackProviders,
   };
 };
