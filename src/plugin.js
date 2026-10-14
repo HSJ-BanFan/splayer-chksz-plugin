@@ -51,7 +51,6 @@ const DIRECT_SEARCH_SETTING = "directSearchFallback";
 const DIRECT_SEARCH_ERROR = "CHKSZ_DIRECT_SEARCH_FAILED";
 const QQ_PUBLIC_SEARCH_URL = "https://u.y.qq.com/cgi-bin/musicu.fcg";
 const DIRECT_SEARCH_TIMEOUT = 4_000;
-// 煎饼（jbsou.cn）是第三方免费解析站：主渠道无版权或上游故障时的最后兜底，不占 ChKSz 额度。
 const JIANBIN_SETTING = "jianbinFallback";
 const JIANBIN_BASE_URL = "https://www.jbsou.cn/";
 const JIANBIN_CHANNEL_KEY = "jianbin";
@@ -78,14 +77,12 @@ const JIANBIN_DELIVERY_UNUSABLE_ERROR = "JIANBIN_DELIVERY_UNUSABLE";
 const JIANBIN_BUDGET_EXHAUSTED_ERROR = "JIANBIN_BUDGET_EXHAUSTED";
 const JIANBIN_NOT_FOUND_ERROR = "JIANBIN_NOT_FOUND";
 const JIANBIN_ATTEMPTED_NOTE = "（煎饼免费源已尝试，未返回可播放地址）";
-// 煎饼的搜索类型 → 它返回的 api.php 地址里的 type 参数。
 const JIANBIN_API_TYPES = {
   netease: "wy",
   qq: "qq",
   kugou: "kg",
   kuwo: "kw",
 };
-// 同类型用平台 ID 直查；跨类型候选没有时长字段，只接受严格匹配（见 jianbinMatchesTrack）。
 const JIANBIN_POLICIES = {
   wy: {
     name: "煎饼·网易云",
@@ -1817,7 +1814,6 @@ const createResolutionCore = () => {
         return [];
       }
       if (!isJianbinForbidden(error)) throw error;
-      // 无 cookie 或 cookie 失效都会 403：本次解析内丢弃后重取一次，再失败就整体冷却。
       if (ctx.forbiddenRetried) {
         throw pluginError(
           JIANBIN_FORBIDDEN_ERROR,
@@ -1902,7 +1898,6 @@ const createResolutionCore = () => {
       try {
         const resolution = jianbinResolveCandidate(candidate, searchType);
         if (state.config.verifyDelivery) {
-          // 体检结果本身有缓存；复用缓存的探测不再占煎饼请求预算。
           if (readCache(state.probes, resolution.url) === undefined) spendJianbin(ctx);
           const unusable = await probeDelivery(resolution.url, state, ctx.deadline, { strict: true });
           if (unusable) throw pluginError(JIANBIN_DELIVERY_UNUSABLE_ERROR, unusable);
@@ -1999,7 +1994,6 @@ const createResolutionCore = () => {
     }
   };
 
-  // 跨平台阶段固定顺序：先 ChKSz 跨平台，再煎饼跨类型；ChKSz 的终止错误直接抛出。
   const resolveCrossFallback = async (
     source,
     policy,
