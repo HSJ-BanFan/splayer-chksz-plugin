@@ -733,10 +733,6 @@ const probeDelivery = async (url, state, deadline, { strict = false } = {}) => {
   return "";
 };
 
-/**
- * 煎饼 provider：免费源的全部实现（状态、搜索、候选解析、交付校验）。
- * 对外只暴露下方的 jianbinProvider 接口，调用方不感知内部函数。
- */
 const createJianbinState = () => ({ cookie: null, cookiePending: null });
 
 const jianbinState = (state) =>
@@ -1123,7 +1119,6 @@ const jianbinProvider = {
   id: JIANBIN_CHANNEL_KEY,
   name: "煎饼",
   stages: ["same", "cross"],
-  // same 阶段只要求煎饼开关与平台支持；cross 阶段还要求跨平台兜底开着且有标题可比。
   enabled(state, task) {
     if (!state.config.jianbinFallback || !JIANBIN_POLICIES[task.source]) return false;
     if (task.stage === "same") return true;
@@ -1159,7 +1154,6 @@ const jianbinProvider = {
 
 const fallbackProviders = [jianbinProvider];
 
-// same/cross 两个阶段共享同一份预算与截止时间；预算沿用煎饼通道的请求上限。
 const createFallbackContext = (state, deadline) => ({
   state,
   deadline,
@@ -1172,16 +1166,11 @@ const createFallbackContext = (state, deadline) => ({
   attempted: false,
 });
 
-// 候选级失败只告警不冷却：同一个 provider 的下一个候选照常尝试。
 const logFallbackCandidateFailure = (provider, candidateId, error) =>
   splayer.log.warn(
     `${provider.name}候选（${candidateId}）不可用：${redactSensitiveData(error?.message ?? error)}`,
   );
 
-/**
- * 兜底阶段调度：按注册顺序取支持该阶段的 provider，返回第一个可用结果。
- * provider 抛错的分类由自己声明，协调器只认 terminal/service/candidate 三类。
- */
 const runFallbackStage = async (stage, task, ctx) => {
   for (const provider of fallbackProviders) {
     if (!provider.stages.includes(stage)) continue;
@@ -1201,6 +1190,11 @@ const runFallbackStage = async (stage, task, ctx) => {
       } else if (kind === "candidate") {
         // provider 自己抛候选级失败时在 error.candidateId 上带候选 ID。
         logFallbackCandidateFailure(provider, error?.candidateId, error);
+      } else {
+        throw pluginError(
+          "FALLBACK_CLASSIFY_INVALID",
+          `兜底 provider ${provider.id} 返回了未知的失败分类：${String(kind)}。`,
+        );
       }
     }
   }

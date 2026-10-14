@@ -24,7 +24,6 @@ const landing = (cookie) => ({
 });
 const searchResult = (items) => ({ status: 200, body: { code: 200, data: items } });
 
-// 关掉煎饼开关，让注入的 fake provider 成为唯一会真正尝试的兜底通道。
 const loadFallbackHost = (overrides = {}) =>
   loadPlugin({
     settings: { jianbinFallback: false },
@@ -158,7 +157,6 @@ test("records a service failure on the provider and keeps going", async () => {
 
   await assert.rejects(host.handlers.musicUrl(song()), { code: "CHKSZ_TRACK_UNAVAILABLE" });
 
-  // same / cross 两个阶段各失败一次，冷却记录都落在同一个 provider 上。
   assert.deepEqual(failures.map(({ error }) => error.code), ["FAKE_SERVICE_DOWN", "FAKE_SERVICE_DOWN"]);
   assert.ok(warned(host, "测试源免费源兜底失败：上游 500"));
   assert.deepEqual(later.calls.map(({ task }) => task.stage), ["same", "cross"]);
@@ -199,6 +197,23 @@ test("rethrows a terminal provider error unchanged", async () => {
 
   await assert.rejects(host.handlers.musicUrl(song()), (error) => error === terminal);
   assert.equal(provider.calls.length, 1);
+});
+
+test("fails loud when a provider returns an unknown classification", async () => {
+  const host = loadFallbackHost();
+  const broken = createFakeProvider({
+    id: "banana",
+    behavior: () => {
+      throw new Error("boom");
+    },
+    classify: () => "banana",
+  });
+  host.fallbackProviders.push(broken);
+
+  await assert.rejects(
+    host.handlers.musicUrl(song()),
+    { code: "FALLBACK_CLASSIFY_INVALID" },
+  );
 });
 
 test("keeps the built-in provider working next to an injected one", async () => {
