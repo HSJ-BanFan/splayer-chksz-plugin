@@ -76,6 +76,7 @@ const JIANBIN_NETWORK_ERROR = "JIANBIN_NETWORK_ERROR";
 const JIANBIN_INVALID_RESPONSE_ERROR = "JIANBIN_INVALID_RESPONSE";
 const JIANBIN_DELIVERY_UNUSABLE_ERROR = "JIANBIN_DELIVERY_UNUSABLE";
 const JIANBIN_BUDGET_EXHAUSTED_ERROR = "JIANBIN_BUDGET_EXHAUSTED";
+const JIANBIN_NOT_FOUND_ERROR = "JIANBIN_NOT_FOUND";
 const JIANBIN_ATTEMPTED_NOTE = "（煎饼免费源已尝试，未返回可播放地址）";
 // 煎饼的搜索类型 → 它返回的 api.php 地址里的 type 参数。
 const JIANBIN_API_TYPES = {
@@ -1749,6 +1750,10 @@ const createResolutionCore = () => {
       error.status = 403;
       throw error;
     }
+    // 搜索没有命中时站点返回 HTTP 200 + code 404（data 为空字符串），这不是服务故障。
+    if (code === 404) {
+      throw pluginError(JIANBIN_NOT_FOUND_ERROR, "煎饼没有找到相关信息。");
+    }
     if (code !== 200) {
       throw pluginError(
         JIANBIN_INVALID_RESPONSE_ERROR,
@@ -1772,6 +1777,8 @@ const createResolutionCore = () => {
           "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
           Referer: JIANBIN_BASE_URL,
           "User-Agent": JIANBIN_USER_AGENT,
+          // 站点仅对 XHR 形态的 POST 返回 JSON；缺少该头时返回 200 HTML。
+          "X-Requested-With": "XMLHttpRequest",
           Cookie: `mk_visit=${cookie}`,
         },
         body,
@@ -1805,6 +1812,10 @@ const createResolutionCore = () => {
     try {
       return jianbinCandidates(await jianbinRequest(body, state, ctx, "search"));
     } catch (error) {
+      if (error?.code === JIANBIN_NOT_FOUND_ERROR) {
+        splayer.log.debug(`煎饼搜索无结果：${type} ${filter} ${input}`);
+        return [];
+      }
       if (!isJianbinForbidden(error)) throw error;
       // 无 cookie 或 cookie 失效都会 403：本次解析内丢弃后重取一次，再失败就整体冷却。
       if (ctx.forbiddenRetried) {
@@ -1829,7 +1840,8 @@ const createResolutionCore = () => {
 
   const jianbinLookupById = async (searchType, id, state, ctx) => {
     const candidates = await jianbinSearchByType(searchType, "id", id, state, ctx);
-    const hit = candidates.find((candidate) => candidate.songid === id);
+    // 不存在的 ID 会回显成 name/artist 为空的占位条目，不能当作命中。
+    const hit = candidates.find((candidate) => candidate.songid === id && candidate.name);
     if (!hit) {
       splayer.log.warn(`煎饼 ID 直查没有返回 ${id} 对应的歌曲。`);
       return [];
@@ -1841,7 +1853,8 @@ const createResolutionCore = () => {
     const raw = textOrEmpty(candidate?.url);
     let url;
     try {
-      url = new URL(raw);
+      // 站点返回的 url 字段是相对地址（api.php?...），这里统一拼成绝对地址。
+      url = new URL(raw, JIANBIN_BASE_URL);
     } catch {
       throw pluginError(JIANBIN_INVALID_RESPONSE_ERROR, "煎饼返回的播放地址不是有效 URL。");
     }
@@ -1864,7 +1877,7 @@ const createResolutionCore = () => {
       );
     }
     return {
-      url: raw,
+      url: url.toString(),
       expire: (t + JIANBIN_SIGN_TTL_SECONDS) * 1000 - JIANBIN_EXPIRY_MARGIN,
       quality: "hq",
     };

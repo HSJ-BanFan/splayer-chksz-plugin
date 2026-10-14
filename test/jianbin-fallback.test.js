@@ -27,14 +27,17 @@ const landing = (cookie) => ({
 
 const searchResult = (items) => ({ status: 200, body: { code: 200, data: items } });
 
-const jianbinUrl = (type, id, { sign = "s1gn", t = 1_900_000_000 } = {}) =>
-  `https://www.jbsou.cn/api.php?get=url&type=${type}&id=${id}&sign=${sign}&t=${t}`;
+// 站点返回的 url 字段是相对地址；绝对地址只是同一签名的另一种写法。
+const jianbinQuery = (type, id, { sign = "s1gn", t = 1_900_000_000 } = {}) =>
+  `api.php?get=url&type=${type}&id=${id}&sign=${sign}&t=${t}`;
+const jianbinUrl = (type, id, options) =>
+  `https://www.jbsou.cn/${jianbinQuery(type, id, options)}`;
 
 const result = (songid, { type = "kw", name = "晴天", artist = "周杰伦", ...urlOptions } = {}) => ({
   name,
   artist,
   songid,
-  url: jianbinUrl(type, songid, urlOptions),
+  url: jianbinQuery(type, songid, urlOptions),
 });
 
 const bodyParams = (request) => new URLSearchParams(request.options.body);
@@ -214,11 +217,82 @@ test("parses mk_visit from the landing page and sends it on the form search", as
   const post = host.jianbinRequests[1];
   assert.equal(post.options.headers.Cookie, "mk_visit=mk-visit_9");
   assert.equal(
+    post.options.headers["X-Requested-With"],
+    "XMLHttpRequest",
+    "缺少该头时站点返回 HTML 而不是 JSON",
+  );
+  assert.equal(
     post.options.headers["Content-Type"],
     "application/x-www-form-urlencoded; charset=UTF-8",
   );
   assert.equal(post.options.body, "input=186109&filter=id&type=netease&page=1");
   assert.equal(host.deliveryProbes.length, 2);
+});
+
+test("accepts an absolute api.php url as well as the relative shape", async () => {
+  const host = loadPlugin({
+    response: UNAVAILABLE,
+    jianbinResponse: (url, options) =>
+      options?.method === "POST"
+        ? searchResult([{
+          name: "晴天",
+          artist: "周杰伦",
+          songid: "186109",
+          url: jianbinUrl("wy", "186109", { t: 1_900_000_500 }),
+        }])
+        : landing("cookie-1"),
+  });
+
+  const resolved = await host.handlers.musicUrl(song());
+
+  assert.equal(resolved.url, jianbinUrl("wy", "186109", { t: 1_900_000_500 }));
+});
+
+test("treats a not-found id lookup as an empty search instead of a channel failure", async () => {
+  const host = loadPlugin({
+    response: (url) => (url.pathname === "/api/163_music" ? UNAVAILABLE : EMPTY_SEARCH),
+    jianbinResponse: (url, options) => {
+      if (options?.method !== "POST") return landing("cookie-1");
+      const params = bodyParams({ options });
+      if (params.get("filter") === "id") {
+        return { status: 200, body: { data: "", code: 404, error: "没有找到相关信息" } };
+      }
+      if (params.get("type") === "kuwo") return searchResult([result("kw-1")]);
+      return searchResult([]);
+    },
+  });
+
+  const resolved = await host.handlers.musicUrl(song());
+
+  assert.equal(resolved.url, jianbinUrl("kw", "kw-1"));
+  const jianbinPosts = host.jianbinRequests.filter(({ options }) => options.method === "POST");
+  assert.deepEqual(
+    jianbinPosts.map((request) => bodyParams(request).get("filter")),
+    ["id", "name"],
+    "无结果不打开冷却，跨类型搜索照常进行",
+  );
+});
+
+test("ignores id-lookup echoes without a song name", async () => {
+  const host = loadPlugin({
+    directSearchResponse: LITE_EMPTY,
+    response: (url) => (url.pathname === "/api/163_music" ? UNAVAILABLE : EMPTY_SEARCH),
+    jianbinResponse: (url, options) => {
+      if (options?.method !== "POST") return landing("cookie-1");
+      const params = bodyParams({ options });
+      if (params.get("filter") === "id") {
+        const id = params.get("input");
+        return searchResult([{ name: "", artist: "", songid: id, url: jianbinQuery("wy", id) }]);
+      }
+      return searchResult([]);
+    },
+  });
+
+  await assert.rejects(
+    host.handlers.musicUrl(song()),
+    (error) => error.code === "CHKSZ_TRACK_UNAVAILABLE",
+  );
+  assert.equal(host.deliveryProbes.length, 0, "无歌名的回显条目不得进入交付体检");
 });
 
 test("refreshes mk_visit once after a search 403 and retries", async () => {
