@@ -1908,6 +1908,7 @@ const createResolutionCore = () => {
           if (unusable) throw pluginError(JIANBIN_DELIVERY_UNUSABLE_ERROR, unusable);
         }
         writeJianbinCached(state, searchType, candidate.songid, resolution);
+        splayer.log.debug(`煎饼 ${searchType} 命中候选 ${candidate.songid}。`);
         return resolution;
       } catch (error) {
         if (
@@ -1986,7 +1987,7 @@ const createResolutionCore = () => {
         : await resolveJianbinCrossType(policy, track, state, ctx);
       if (result) {
         splayer.log.info(
-          `《${textOrEmpty(track.name) || id}》已由${policy.name}解析，交付音质 ${result.quality}。`,
+          `《${textOrEmpty(track.name) || id}》已由煎饼免费源解析（来源 ${source}），交付音质 ${result.quality}。`,
         );
       }
       return result;
