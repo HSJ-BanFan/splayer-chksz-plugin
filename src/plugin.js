@@ -842,12 +842,12 @@ const throwJianbinFailure = (code, error, timeout) => {
 
 // mk_visit 并发合并，即使智能缓存关闭也要合并：无 cookie 的搜索会被拒 403。
 const bootstrapJianbinCookie = async (state, ctx) => {
-  const provider = jianbinState(state);
-  if (provider.cookie && provider.cookie.until > Date.now()) {
-    return provider.cookie.value;
+  const jianbin = jianbinState(state);
+  if (jianbin.cookie && jianbin.cookie.until > Date.now()) {
+    return jianbin.cookie.value;
   }
-  if (!provider.cookiePending) {
-    provider.cookiePending = (async () => {
+  if (!jianbin.cookiePending) {
+    jianbin.cookiePending = (async () => {
       assertCurrentSession(state);
       spendJianbin(ctx);
       const timeout = jianbinTimeout(JIANBIN_BOOTSTRAP_TIMEOUT, ctx);
@@ -875,13 +875,13 @@ const bootstrapJianbinCookie = async (state, ctx) => {
             : `煎饼首页返回 HTTP ${status}，无法获取 mk_visit。`,
         );
       }
-      provider.cookie = { value: match[1], until: Date.now() + JIANBIN_COOKIE_TTL };
+      jianbin.cookie = { value: match[1], until: Date.now() + JIANBIN_COOKIE_TTL };
       return match[1];
     })().finally(() => {
-      provider.cookiePending = null;
+      jianbin.cookiePending = null;
     });
   }
-  return provider.cookiePending;
+  return jianbin.cookiePending;
 };
 
 const jianbinResponseBody = (response) => {
@@ -1206,7 +1206,6 @@ const runFallbackStage = async (stage, task, ctx) => {
   }
   return null;
 };
-
 
 const createResolutionCore = () => {
   const sharePending = async (state, map, key, operation) => {
