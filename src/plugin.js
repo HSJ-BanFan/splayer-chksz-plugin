@@ -1,7 +1,7 @@
 /**
  * @name        ChKSz 音源
  * @id          chksz.splayer-source
- * @version     0.8.2
+ * @version     0.9.0
  * @description 为 SPlayer-Next 解析网易云 / QQ 音乐 / 酷狗音源：超清母带、Hi-Res、无损，无版权歌曲自动跨平台兜底
  * @author      HSJ-BanFan
  * @homepage    https://github.com/HSJ-BanFan/splayer-chksz-plugin
@@ -9,7 +9,7 @@
  * @grant       network
  * @apiLevel    2
  * @updateUrl   https://raw.githubusercontent.com/HSJ-BanFan/splayer-chksz-plugin/main/dist/chksz.splayer-source.js
- * @changelog   注册元数据搜索；网易云封面独立于音频解析并复用已有封面
+ * @changelog   新增煎饼（jbsou.cn）免费兜底通道：主渠道不可用时按平台 ID 直查，再按严格匹配跨类型搜索；音质上限 hq
  */
 
 const API_BASE_URL = "https://api.chksz.com";
@@ -51,6 +51,60 @@ const DIRECT_SEARCH_SETTING = "directSearchFallback";
 const DIRECT_SEARCH_ERROR = "CHKSZ_DIRECT_SEARCH_FAILED";
 const QQ_PUBLIC_SEARCH_URL = "https://u.y.qq.com/cgi-bin/musicu.fcg";
 const DIRECT_SEARCH_TIMEOUT = 4_000;
+// 煎饼（jbsou.cn）是第三方免费解析站：主渠道无版权或上游故障时的最后兜底，不占 ChKSz 额度。
+const JIANBIN_SETTING = "jianbinFallback";
+const JIANBIN_BASE_URL = "https://www.jbsou.cn/";
+const JIANBIN_CHANNEL_KEY = "jianbin";
+const JIANBIN_CACHE_VERSION = "jianbin:v1";
+const JIANBIN_USER_AGENT =
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
+const JIANBIN_REQUEST_BUDGET = 6;
+const JIANBIN_SAME_TYPE_DEADLINE = 4_000;
+const JIANBIN_CROSS_TYPE_DEADLINE = 6_000;
+const JIANBIN_BOOTSTRAP_TIMEOUT = 4_000;
+const JIANBIN_SEARCH_TIMEOUT = 5_000;
+// 站点自己的续签阈值是签名签发 1700 秒；缓存与上报都按这个安全窗计算。
+const JIANBIN_SIGN_TTL_SECONDS = 1_700;
+const JIANBIN_EXPIRY_MARGIN = 60_000;
+const JIANBIN_COOKIE_TTL = 11 * 60 * 60_000 + 55 * 60_000;
+// 无 mk_visit 的搜索会返回 403，而 cookie 值只能从首页正文的 JS 里解析，响应头里没有。
+const JIANBIN_COOKIE_PATTERN = /document\.cookie\s*=\s*["']mk_visit=([A-Za-z0-9_-]+);/;
+const JIANBIN_BOOTSTRAP_FAILED_ERROR = "JIANBIN_BOOTSTRAP_FAILED";
+const JIANBIN_FORBIDDEN_ERROR = "JIANBIN_FORBIDDEN";
+const JIANBIN_RATE_LIMITED_ERROR = "JIANBIN_RATE_LIMITED";
+const JIANBIN_NETWORK_ERROR = "JIANBIN_NETWORK_ERROR";
+const JIANBIN_INVALID_RESPONSE_ERROR = "JIANBIN_INVALID_RESPONSE";
+const JIANBIN_DELIVERY_UNUSABLE_ERROR = "JIANBIN_DELIVERY_UNUSABLE";
+const JIANBIN_BUDGET_EXHAUSTED_ERROR = "JIANBIN_BUDGET_EXHAUSTED";
+const JIANBIN_ATTEMPTED_NOTE = "（煎饼免费源已尝试，未返回可播放地址）";
+// 煎饼的搜索类型 → 它返回的 api.php 地址里的 type 参数。
+const JIANBIN_API_TYPES = {
+  netease: "wy",
+  qq: "qq",
+  kugou: "kg",
+  kuwo: "kw",
+};
+// 同类型用平台 ID 直查；跨类型候选没有时长字段，只接受严格匹配（见 jianbinMatchesTrack）。
+const JIANBIN_POLICIES = {
+  wy: {
+    name: "煎饼·网易云",
+    searchType: "netease",
+    idPattern: /^\d+$/,
+    crossTypes: ["kuwo", "qq", "kugou"],
+  },
+  tx: {
+    name: "煎饼·QQ 音乐",
+    searchType: "qq",
+    idPattern: /^[A-Za-z0-9]{8,20}$/,
+    crossTypes: ["kuwo", "netease", "kugou"],
+  },
+  kg: {
+    name: "煎饼·酷狗",
+    searchType: "kugou",
+    idPattern: /^[0-9A-Fa-f]{32}$/,
+    crossTypes: ["kuwo", "netease", "qq"],
+  },
+};
 const createSearchId = () => String(
   BigInt(Math.floor(Math.random() * 20) + 1) * 18014398509481984n +
   BigInt(Math.floor(Math.random() * 4194305)) * 4294967296n +
@@ -345,6 +399,7 @@ const createResolutionCore = () => {
       economyMode: enabledSetting("economyMode", false),
       metadataFallback: enabledSetting("metadataFallback", true),
       crossPlatformFallback: enabledSetting(CROSS_PLATFORM_SETTING, true),
+      jianbinFallback: enabledSetting(JIANBIN_SETTING, true),
       directSearchFallback: enabledSetting(DIRECT_SEARCH_SETTING, true),
       playableFirst: enabledSetting("playableFirst", false),
       verifyDelivery: enabledSetting("verifyDelivery", true),
@@ -357,7 +412,7 @@ const createResolutionCore = () => {
         pending: new Map(), actionPending: new Map(),
         channelCooldowns: new Map(), unavailableTracks: new Map(), probes: new Map(),
         searchFailures: new Map(), searchCooldowns: new Map(), directSearchCooldowns: new Map(),
-        rateLimitUntil: 0,
+        rateLimitUntil: 0, jianbinCookie: null, jianbinCookiePending: null,
       };
     }
     return session;
@@ -802,12 +857,21 @@ const createResolutionCore = () => {
   const isTierUnavailable = (error) =>
     isUnavailableQualityError(error) || error?.code === DELIVERY_UNUSABLE_ERROR;
 
+  const isProbeBodyEmpty = (body) => {
+    if (body === undefined || body === null || body === "") return true;
+    if (typeof body === "string") return body.length === 0;
+    if (typeof body.byteLength === "number") return body.byteLength === 0;
+    if (typeof body.length === "number") return body.length === 0;
+    return false;
+  };
+
   /**
    * 返回地址前的交付体检：只取前几个字节确认地址真的能拉流。
    * SPlayer 在播放失败时只会换音源、不会降音质，所以"这个地址能不能播"必须由插件自己兜。
+   * strict 供煎饼这类第三方源使用：还要拒绝 HTML 错误页和空响应。
    * @returns 不可用原因；可以放行时返回空串
    */
-  const probeDelivery = async (url, state, deadline) => {
+  const probeDelivery = async (url, state, deadline, { strict = false } = {}) => {
     const cached = readCache(state.probes, url);
     if (cached !== undefined) return cached;
     const remaining = Number.isFinite(deadline) ? deadline - Date.now() : Infinity;
@@ -840,6 +904,20 @@ const createResolutionCore = () => {
       const reason = `地址返回 HTTP ${status}`;
       writeCache(state.probes, url, reason, Date.now() + CACHE_TTL);
       return reason;
+    }
+
+    if (strict) {
+      const contentType = getHeader(response?.headers, "content-type");
+      if (/^text\//i.test(contentType)) {
+        const reason = `地址返回的是网页（Content-Type ${redactSensitiveData(contentType)}）`;
+        writeCache(state.probes, url, reason, Date.now() + CACHE_TTL);
+        return reason;
+      }
+      if (isProbeBodyEmpty(response?.body)) {
+        const reason = "地址没有返回任何数据";
+        writeCache(state.probes, url, reason, Date.now() + CACHE_TTL);
+        return reason;
+      }
     }
 
     writeCache(state.probes, url, "", Date.now() + CACHE_TTL);
@@ -1501,6 +1579,439 @@ const createResolutionCore = () => {
     return null;
   };
 
+  const jianbinCacheId = (searchType, songid) => `${JIANBIN_CACHE_VERSION}:${searchType}:${songid}`;
+
+  const readJianbinCached = (state, searchType, songid) =>
+    state.config.smartCache ? readCache(state.responses, jianbinCacheId(searchType, songid)) : undefined;
+
+  const writeJianbinCached = (state, searchType, songid, resolution) => {
+    if (!state.config.smartCache) return;
+    writeCache(
+      state.responses,
+      jianbinCacheId(searchType, songid),
+      resolution,
+      Math.min(resolution.expire - URL_EXPIRY_MARGIN, Date.now() + CACHE_TTL),
+    );
+  };
+
+  const createJianbinContext = (state, deadline) => ({
+    deadline,
+    stageDeadline: deadline,
+    budget: {
+      remaining: state.config.economyMode ? 3 : JIANBIN_REQUEST_BUDGET,
+      deadline,
+    },
+    forbiddenRetried: false,
+    attempted: false,
+  });
+
+  const isJianbinBudgetError = (error) => error?.code === JIANBIN_BUDGET_EXHAUSTED_ERROR;
+
+  const isJianbinForbidden = (error) =>
+    error?.code === "JIANBIN_HTTP_403" || Number(error?.status) === 403;
+
+  const isJianbinServiceError = (error) => {
+    const code = String(error?.code ?? "");
+    if (
+      code === JIANBIN_BOOTSTRAP_FAILED_ERROR ||
+      code === JIANBIN_FORBIDDEN_ERROR ||
+      code === JIANBIN_NETWORK_ERROR ||
+      code === JIANBIN_INVALID_RESPONSE_ERROR
+    ) {
+      return true;
+    }
+    const status = Number(/^JIANBIN_HTTP_(\d+)$/.exec(code)?.[1] ?? error?.status ?? 0);
+    return status === 429 || status >= 500;
+  };
+
+  const isFallbackTermination = (error) =>
+    isHostCancellationError(error) || isResolutionTimeoutError(error) ||
+    isCrossPlatformLimitError(error) || isAccountError(error);
+
+  const noteJianbinFailure = (state, error) => {
+    if (!isJianbinServiceError(error)) return;
+    const duration = Number(error?.status) === 429
+      ? cooldownMillis(error, 60_000)
+      : CHANNEL_COOLDOWN;
+    state.channelCooldowns.set(JIANBIN_CHANNEL_KEY, Date.now() + duration);
+  };
+
+  const appendJianbinNote = (error, ctx) => {
+    if (!ctx?.attempted) return error;
+    const wrapped = pluginError(error?.code, `${error?.message ?? error}${JIANBIN_ATTEMPTED_NOTE}`);
+    if (error?.status !== undefined) wrapped.status = error.status;
+    if (error?.retryAfterSeconds !== undefined) wrapped.retryAfterSeconds = error.retryAfterSeconds;
+    return wrapped;
+  };
+
+  const spendJianbin = (ctx) => {
+    if (Date.now() >= ctx.deadline) {
+      throw pluginError(RESOLUTION_TIMEOUT_ERROR, "SPlayer 播放地址解析已达到时间上限。");
+    }
+    if (
+      ctx.budget.remaining <= 0 ||
+      Date.now() >= ctx.budget.deadline ||
+      Date.now() >= ctx.stageDeadline
+    ) {
+      throw pluginError(
+        JIANBIN_BUDGET_EXHAUSTED_ERROR,
+        "煎饼免费源兜底已达到请求或时间上限。",
+      );
+    }
+    ctx.budget.remaining -= 1;
+  };
+
+  const jianbinTimeout = (stepTimeout, ctx) => {
+    const remaining = Math.min(
+      ctx.stageDeadline - Date.now(),
+      ctx.deadline - Date.now(),
+      ctx.budget.deadline - Date.now(),
+    );
+    return Math.max(1, Math.min(stepTimeout, remaining));
+  };
+
+  // 宿主取消与总超时是终止错误；其余失败按调用方给的错误码包装，由煎饼通道统一吸收。
+  const throwJianbinFailure = (code, error, timeout) => {
+    if (isHostCancellationError(error)) {
+      const hostCode =
+        typeof error?.code === "string" && error.code ? error.code : "PLUGIN_CANCELLED";
+      throw pluginError(hostCode, redactSensitiveData(error?.message ?? "SPlayer 已取消请求。"));
+    }
+    if (isResolutionTimeoutError(error) || isCrossPlatformLimitError(error)) throw error;
+    if (isHostRequestTimeoutError(error) || isRequestTimeoutError(error)) {
+      throw pluginError(code, `煎饼请求超时（${timeout} 毫秒）。`);
+    }
+    throw pluginError(code, `煎饼请求失败：${redactSensitiveData(error?.message ?? error)}`);
+  };
+
+  // mk_visit 并发合并，即使智能缓存关闭也要合并：无 cookie 的搜索会被拒 403。
+  const bootstrapJianbinCookie = async (state, ctx) => {
+    if (state.jianbinCookie && state.jianbinCookie.until > Date.now()) {
+      return state.jianbinCookie.value;
+    }
+    if (!state.jianbinCookiePending) {
+      state.jianbinCookiePending = (async () => {
+        assertCurrentSession(state);
+        spendJianbin(ctx);
+        const timeout = jianbinTimeout(JIANBIN_BOOTSTRAP_TIMEOUT, ctx);
+        let response;
+        try {
+          response = await requestWithTimeout(JIANBIN_BASE_URL, {
+            method: "GET",
+            headers: { Referer: JIANBIN_BASE_URL, "User-Agent": JIANBIN_USER_AGENT },
+            responseType: "text",
+            timeout,
+          });
+        } catch (error) {
+          throwJianbinFailure(JIANBIN_BOOTSTRAP_FAILED_ERROR, error, timeout);
+        }
+        assertCurrentSession(state);
+        const status = Number(response?.status) || 0;
+        const reachable = status >= 200 && status < 300;
+        const text = reachable && typeof response?.body === "string" ? response.body : "";
+        const match = JIANBIN_COOKIE_PATTERN.exec(text);
+        if (!match) {
+          throw pluginError(
+            JIANBIN_BOOTSTRAP_FAILED_ERROR,
+            reachable
+              ? "煎饼首页没有返回 mk_visit Cookie。"
+              : `煎饼首页返回 HTTP ${status}，无法获取 mk_visit。`,
+          );
+        }
+        state.jianbinCookie = { value: match[1], until: Date.now() + JIANBIN_COOKIE_TTL };
+        return match[1];
+      })().finally(() => {
+        state.jianbinCookiePending = null;
+      });
+    }
+    return state.jianbinCookiePending;
+  };
+
+  const jianbinResponseBody = (response) => {
+    const status = Number(response?.status) || 0;
+    if (status < 200 || status >= 300) {
+      const error = pluginError(
+        `JIANBIN_HTTP_${status || "ERROR"}`,
+        `煎饼请求失败（HTTP ${status}）。`,
+      );
+      error.status = status;
+      const retryAfter = Number(getHeader(response?.headers, "retry-after"));
+      if (Number.isFinite(retryAfter) && retryAfter > 0) error.retryAfterSeconds = retryAfter;
+      throw error;
+    }
+    const body = parseLooseJson(response?.body);
+    if (!isRecord(body)) {
+      throw pluginError(JIANBIN_INVALID_RESPONSE_ERROR, "煎饼返回的不是有效 JSON 对象。");
+    }
+    const code = Number(body.code);
+    if (code === 403) {
+      const error = pluginError("JIANBIN_HTTP_403", "煎饼拒绝访问（403）。");
+      error.status = 403;
+      throw error;
+    }
+    if (code !== 200) {
+      throw pluginError(
+        JIANBIN_INVALID_RESPONSE_ERROR,
+        `煎饼返回错误码 ${Number.isFinite(code) ? code : "invalid"}。`,
+      );
+    }
+    return body;
+  };
+
+  const jianbinRequest = async (body, state, ctx, kind) => {
+    assertCurrentSession(state);
+    const cookie = await bootstrapJianbinCookie(state, ctx);
+    spendJianbin(ctx);
+    const stepTimeout = kind === "bootstrap" ? JIANBIN_BOOTSTRAP_TIMEOUT : JIANBIN_SEARCH_TIMEOUT;
+    const timeout = jianbinTimeout(stepTimeout, ctx);
+    let response;
+    try {
+      response = await requestWithTimeout(JIANBIN_BASE_URL, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+          Referer: JIANBIN_BASE_URL,
+          "User-Agent": JIANBIN_USER_AGENT,
+          Cookie: `mk_visit=${cookie}`,
+        },
+        body,
+        responseType: "json",
+        timeout,
+      });
+    } catch (error) {
+      throwJianbinFailure(JIANBIN_NETWORK_ERROR, error, timeout);
+    }
+    assertCurrentSession(state);
+    return jianbinResponseBody(response);
+  };
+
+  const jianbinCandidates = (body) => {
+    const list = body?.data;
+    if (!Array.isArray(list)) {
+      throw pluginError(JIANBIN_INVALID_RESPONSE_ERROR, "煎饼返回的歌曲列表结构无效。");
+    }
+    return list
+      .map((item) => ({
+        name: textOrEmpty(item?.name),
+        singer: textOrEmpty(item?.artist),
+        songid: textOrEmpty(String(item?.songid ?? "")),
+        url: textOrEmpty(item?.url),
+      }))
+      .filter((item) => item.songid && item.url);
+  };
+
+  const jianbinSearchByType = async (type, filter, input, state, ctx) => {
+    const body = `input=${encodeURIComponent(input)}&filter=${filter}&type=${type}&page=1`;
+    try {
+      return jianbinCandidates(await jianbinRequest(body, state, ctx, "search"));
+    } catch (error) {
+      if (!isJianbinForbidden(error)) throw error;
+      // 无 cookie 或 cookie 失效都会 403：本次解析内丢弃后重取一次，再失败就整体冷却。
+      if (ctx.forbiddenRetried) {
+        throw pluginError(
+          JIANBIN_FORBIDDEN_ERROR,
+          "煎饼拒绝访问（HTTP 403），刷新 mk_visit 一次后仍被拒绝。",
+        );
+      }
+      ctx.forbiddenRetried = true;
+      state.jianbinCookie = null;
+      try {
+        return jianbinCandidates(await jianbinRequest(body, state, ctx, "search"));
+      } catch (retryError) {
+        if (!isJianbinForbidden(retryError)) throw retryError;
+        throw pluginError(
+          JIANBIN_FORBIDDEN_ERROR,
+          "煎饼拒绝访问（HTTP 403），刷新 mk_visit 一次后仍被拒绝。",
+        );
+      }
+    }
+  };
+
+  const jianbinLookupById = async (searchType, id, state, ctx) => {
+    const candidates = await jianbinSearchByType(searchType, "id", id, state, ctx);
+    const hit = candidates.find((candidate) => candidate.songid === id);
+    if (!hit) {
+      splayer.log.warn(`煎饼 ID 直查没有返回 ${id} 对应的歌曲。`);
+      return [];
+    }
+    return [hit];
+  };
+
+  const jianbinResolveCandidate = (candidate, apiType) => {
+    const raw = textOrEmpty(candidate?.url);
+    let url;
+    try {
+      url = new URL(raw);
+    } catch {
+      throw pluginError(JIANBIN_INVALID_RESPONSE_ERROR, "煎饼返回的播放地址不是有效 URL。");
+    }
+    const params = url.searchParams;
+    const t = Number(params.get("t"));
+    const valid =
+      url.protocol === "https:" &&
+      url.host === "www.jbsou.cn" &&
+      url.pathname === "/api.php" &&
+      params.get("get") === "url" &&
+      params.get("type") === JIANBIN_API_TYPES[apiType] &&
+      params.get("id") === candidate.songid &&
+      Boolean(params.get("sign")) &&
+      Number.isInteger(t) &&
+      t > 0;
+    if (!valid) {
+      throw pluginError(
+        JIANBIN_INVALID_RESPONSE_ERROR,
+        `煎饼返回的播放地址不符合预期（${redactSensitiveData(raw)}）。`,
+      );
+    }
+    return {
+      url: raw,
+      expire: (t + JIANBIN_SIGN_TTL_SECONDS) * 1000 - JIANBIN_EXPIRY_MARGIN,
+      quality: "hq",
+    };
+  };
+
+  const jianbinMatchesTrack = async (searchType, track, state, ctx) => {
+    const title = textOrEmpty(track.name).slice(0, SEARCH_KEYWORD_MAX_LENGTH);
+    if (!title) return [];
+    const candidates = await jianbinSearchByType(searchType, "name", title, state, ctx);
+    // 煎饼候选没有时长字段，无法证明宽松版本匹配的等价性，只接受规范标题严格相等。
+    return candidates.filter((candidate) => matchScore(track, candidate) === 2);
+  };
+
+  const resolveJianbinCandidates = async (candidates, searchType, state, ctx) => {
+    const limit = state.config.economyMode ? 1 : CROSS_PLATFORM_MAX_CANDIDATES;
+    for (const candidate of candidates.slice(0, limit)) {
+      const cached = readJianbinCached(state, searchType, candidate.songid);
+      if (cached) {
+        splayer.log.debug(`煎饼复用缓存：${searchType} ${candidate.songid}`);
+        return { ...cached };
+      }
+      try {
+        const resolution = jianbinResolveCandidate(candidate, searchType);
+        if (state.config.verifyDelivery) {
+          // 体检结果本身有缓存；复用缓存的探测不再占煎饼请求预算。
+          if (readCache(state.probes, resolution.url) === undefined) spendJianbin(ctx);
+          const unusable = await probeDelivery(resolution.url, state, ctx.deadline, { strict: true });
+          if (unusable) throw pluginError(JIANBIN_DELIVERY_UNUSABLE_ERROR, unusable);
+        }
+        writeJianbinCached(state, searchType, candidate.songid, resolution);
+        return resolution;
+      } catch (error) {
+        if (
+          isFallbackTermination(error) ||
+          isJianbinBudgetError(error) ||
+          isJianbinServiceError(error)
+        ) {
+          throw error;
+        }
+        splayer.log.warn(
+          `煎饼候选（${candidate.songid}）不可用：${redactSensitiveData(error?.message ?? error)}`,
+        );
+      }
+    }
+    return null;
+  };
+
+  const resolveJianbinSameType = async (policy, track, id, state, ctx) => {
+    ctx.stageDeadline = Math.min(ctx.deadline, Date.now() + JIANBIN_SAME_TYPE_DEADLINE);
+    const { searchType } = policy;
+    if (policy.idPattern.test(String(id))) {
+      const cached = readJianbinCached(state, searchType, String(id));
+      if (cached) {
+        splayer.log.debug(`煎饼复用缓存：${searchType} ${id}`);
+        return { ...cached };
+      }
+      return resolveJianbinCandidates(
+        await jianbinLookupById(searchType, String(id), state, ctx),
+        searchType,
+        state,
+        ctx,
+      );
+    }
+    // ID 形状与煎饼不兼容时退回同平台歌名搜索；同平台不算跨平台，不做交叉匹配。
+    const title = textOrEmpty(track.name).slice(0, SEARCH_KEYWORD_MAX_LENGTH);
+    if (!title) return null;
+    return resolveJianbinCandidates(
+      await jianbinSearchByType(searchType, "name", title, state, ctx),
+      searchType,
+      state,
+      ctx,
+    );
+  };
+
+  const resolveJianbinCrossType = async (policy, track, state, ctx) => {
+    ctx.stageDeadline = Math.min(ctx.deadline, Date.now() + JIANBIN_CROSS_TYPE_DEADLINE);
+    for (const searchType of policy.crossTypes) {
+      const result = await resolveJianbinCandidates(
+        await jianbinMatchesTrack(searchType, track, state, ctx),
+        searchType,
+        state,
+        ctx,
+      );
+      if (result) return result;
+    }
+    return null;
+  };
+
+  // 煎饼兜底失败按服务级/候选级吸收；终止错误（取消、总超时、限额、账户）原样抛出。
+  const resolveViaJianbin = async (stage, source, track, id, state, ctx) => {
+    const policy = JIANBIN_POLICIES[source];
+    if (!policy) return null;
+    const cooldownSeconds = coolingDownChannel(state, JIANBIN_CHANNEL_KEY);
+    if (cooldownSeconds > 0) {
+      const cooldownError = pluginError(
+        JIANBIN_RATE_LIMITED_ERROR,
+        `煎饼免费源故障冷却中（还剩 ${cooldownSeconds} 秒），未发起请求。`,
+      );
+      splayer.log.warn(cooldownError.message);
+      return null;
+    }
+    ctx.attempted = true;
+    try {
+      const result = stage === "same"
+        ? await resolveJianbinSameType(policy, track, id, state, ctx)
+        : await resolveJianbinCrossType(policy, track, state, ctx);
+      if (result) {
+        splayer.log.info(
+          `《${textOrEmpty(track.name) || id}》已由${policy.name}解析，交付音质 ${result.quality}。`,
+        );
+      }
+      return result;
+    } catch (error) {
+      if (isFallbackTermination(error)) throw error;
+      noteJianbinFailure(state, error);
+      splayer.log.warn(`煎饼免费源兜底失败：${redactSensitiveData(error?.message ?? error)}`);
+      return null;
+    }
+  };
+
+  // 跨平台阶段固定顺序：先 ChKSz 跨平台，再煎饼跨类型；ChKSz 的终止错误直接抛出。
+  const resolveCrossFallback = async (
+    source,
+    policy,
+    quality,
+    track,
+    deadline,
+    state,
+    primaryError,
+    jianbinContext,
+  ) => {
+    let fallback = null;
+    let crossError = null;
+    try {
+      fallback = await resolveAcrossPlatforms(policy, quality, track, deadline, state, primaryError);
+    } catch (error) {
+      if (isFallbackTermination(error)) throw error;
+      crossError = error;
+    }
+    if (fallback) return { result: fallback };
+    if (jianbinContext) {
+      const jianbinResult = await resolveViaJianbin("cross", source, track, "", state, jianbinContext);
+      if (jianbinResult) return { result: jianbinResult };
+    }
+    return { error: crossError };
+  };
+
   const resolveUncached = async ({ source, quality, id, track }, state) => {
     const { policy } = buildTrackParams(source, id, quality);
     const descriptor = getTrackDescriptor(track);
@@ -1509,6 +2020,7 @@ const createResolutionCore = () => {
       Boolean(policy.crossPlatform) &&
       Boolean(descriptor.name) &&
       state.config.crossPlatformFallback;
+    const jianbinEnabled = Boolean(state.config.jianbinFallback) && Boolean(JIANBIN_POLICIES[source]);
 
     const primaryCooldownSeconds = coolingDownChannel(state, source);
     if (primaryCooldownSeconds > 0) {
@@ -1516,20 +2028,23 @@ const createResolutionCore = () => {
         CHANNEL_COOLDOWN_ERROR,
         `${policy.name}上游通道冷却中（还剩 ${primaryCooldownSeconds} 秒），跳过本次主渠道请求。`,
       );
-      if (!canCrossSearch) throw cooldownError;
+      const jianbinContext = jianbinEnabled ? createJianbinContext(state, deadline) : null;
+      if (jianbinContext) {
+        const jianbinResult = await resolveViaJianbin("same", source, descriptor, id, state, jianbinContext);
+        if (jianbinResult) return jianbinResult;
+      }
+      if (!canCrossSearch) throw appendJianbinNote(cooldownError, jianbinContext);
 
-      const fallback = await resolveAcrossPlatforms(
-        policy,
-        quality,
-        descriptor,
-        deadline,
-        state,
-        cooldownError,
+      const cross = await resolveCrossFallback(
+        source, policy, quality, descriptor, deadline, state, cooldownError, jianbinContext,
       );
-      if (fallback) return fallback;
-      throw pluginError(
-        CROSS_PLATFORM_UNAVAILABLE_ERROR,
-        `${cooldownError.message}且在其他平台中未匹配到《${descriptor.name}》。请稍后重试或更换音源。`,
+      if (cross.result) return cross.result;
+      throw appendJianbinNote(
+        cross.error ?? pluginError(
+          CROSS_PLATFORM_UNAVAILABLE_ERROR,
+          `${cooldownError.message}且在其他平台中未匹配到《${descriptor.name}》。请稍后重试或更换音源。`,
+        ),
+        jianbinContext,
       );
     }
 
@@ -1542,27 +2057,37 @@ const createResolutionCore = () => {
       return resolution.result;
     } catch (error) {
       noteChannelFailure(state, source, error);
-      const canCrossSearchAfterFailure =
-        canCrossSearch &&
-        (isUnavailableQualityError(error) || isUpstreamUnavailableError(error));
-      if (!canCrossSearchAfterFailure) throw error;
+      const recoverable = isUnavailableQualityError(error) || isUpstreamUnavailableError(error);
+      const canCrossSearchAfterFailure = canCrossSearch && recoverable;
+      const canJianbinAfterFailure = jianbinEnabled && recoverable;
+      if (!canCrossSearchAfterFailure && !canJianbinAfterFailure) throw error;
 
-      const fallback = await resolveAcrossPlatforms(policy, quality, descriptor, deadline, state, error);
-      if (fallback) return fallback;
+      const jianbinContext = canJianbinAfterFailure ? createJianbinContext(state, deadline) : null;
+      if (jianbinContext) {
+        const jianbinResult = await resolveViaJianbin("same", source, descriptor, id, state, jianbinContext);
+        if (jianbinResult) return jianbinResult;
+      }
+      if (!canCrossSearchAfterFailure) throw appendJianbinNote(error, jianbinContext);
+
+      const cross = await resolveCrossFallback(
+        source, policy, quality, descriptor, deadline, state, error, jianbinContext,
+      );
+      if (cross.result) return cross.result;
+      if (cross.error) throw appendJianbinNote(cross.error, jianbinContext);
 
       const platformNames = policy.crossPlatform.sources
         .map((target) => getSourcePolicy(target).name)
         .join("、");
       if (isUpstreamUnavailableError(error)) {
-        throw pluginError(
+        throw appendJianbinNote(pluginError(
           CROSS_PLATFORM_UNAVAILABLE_ERROR,
           `${policy.name}无法提供《${descriptor.name}》的播放地址（${error.message}），且在 ${platformNames} 中未匹配到同一首歌。以上是各搜索或解析通道的状态，不代表歌曲不存在，请稍后重试或更换音源。`,
-        );
+        ), jianbinContext);
       }
-      throw pluginError(
+      throw appendJianbinNote(pluginError(
         "CHKSZ_TRACK_UNAVAILABLE",
         `${policy.name}无法提供《${descriptor.name}》的播放地址（${error.message}），且在 ${platformNames} 中未匹配到同一首歌。`,
-      );
+      ), jianbinContext);
     }
   };
 
@@ -1763,6 +2288,14 @@ runtimeAdapter.register({
       label: "主渠道不可用时跨平台兜底",
       description:
         "当前来源无版权或上游故障时，按歌名、歌手和时长在其他平台匹配同一首歌，再使用目标平台自己的 ID 解析。每次匹配会额外消耗 ChKSz 额度。",
+      default: true,
+    },
+    {
+      key: JIANBIN_SETTING,
+      type: "switch",
+      label: "煎饼免费源兜底",
+      description:
+        "主渠道无版权或上游故障时，用第三方免费源 煎饼（jbsou.cn）兜底同一首歌。无需 Key、不消耗 ChKSz 额度，音质上限约 320k mp3，仅作兜底；第三方服务可能随时变更或限流。",
       default: true,
     },
     {
