@@ -15,6 +15,7 @@ export const loadPlugin = ({
   response,
   probeResponse,
   directSearchResponse,
+  jianbinResponse,
   now = () => Date.now(),
   sourceText = pluginSource,
 } = {}) => {
@@ -23,6 +24,7 @@ export const loadPlugin = ({
   const requests = [];
   const deliveryProbes = [];
   const directSearches = [];
+  const jianbinRequests = [];
   const hostRequests = [];
   const logs = [];
   const settings = { apiKey, ...settingOverrides };
@@ -40,6 +42,7 @@ export const loadPlugin = ({
     async request(url, options) {
       const entry = { url, options };
       hostRequests.push(entry);
+      const parsedUrl = new URL(url);
       const isProbe = Boolean(options?.headers?.Range || options?.headers?.range);
       // 交付体检是对 CDN 的前几个字节探测，不算 ChKSz API 调用；`requests` 只保留解析类请求，
       // `deliveryProbes` 单独记账，`hostRequests` 是完整日志。
@@ -50,22 +53,31 @@ export const loadPlugin = ({
           return { status: 206, body: new Uint8Array([0x66, 0x4c, 0x61, 0x43]) };
         }
         return typeof probeResponse === "function"
-          ? probeResponse(new URL(url), options)
+          ? probeResponse(parsedUrl, options)
           : probeResponse;
+      }
+      if (parsedUrl.host === "api.chksz.com") {
+        requests.push(entry);
+        return typeof response === "function"
+          ? response(parsedUrl, options)
+          : response;
+      }
+      // 煎饼（免费兜底源）单独记账；默认返回快速 503，让既有测试的请求序列与预算保持不变，
+      // 要模拟煎饼可用就传 jianbinResponse。
+      if (parsedUrl.host === "www.jbsou.cn") {
+        jianbinRequests.push(entry);
+        if (jianbinResponse === undefined) return { status: 503, body: "" };
+        return typeof jianbinResponse === "function"
+          ? jianbinResponse(parsedUrl, options)
+          : jianbinResponse;
       }
       // 备用搜索打的是 QQ 音乐等公开接口，不是 ChKSz；单独记账，默认当作不可用，
       // 这样既有测试的 `requests` 和错误语义都不变，要模拟命中就传 directSearchResponse。
-      if (new URL(url).host !== "api.chksz.com") {
-        directSearches.push(entry);
-        if (directSearchResponse === undefined) return { status: 503, body: "" };
-        return typeof directSearchResponse === "function"
-          ? directSearchResponse(new URL(url), options)
-          : directSearchResponse;
-      }
-      requests.push(entry);
-      return typeof response === "function"
-        ? response(new URL(url), options)
-        : response;
+      directSearches.push(entry);
+      if (directSearchResponse === undefined) return { status: 503, body: "" };
+      return typeof directSearchResponse === "function"
+        ? directSearchResponse(parsedUrl, options)
+        : directSearchResponse;
     },
     log: Object.fromEntries(
       ["debug", "info", "warn", "error"].map((level) => [
@@ -98,6 +110,7 @@ export const loadPlugin = ({
     requests,
     deliveryProbes,
     directSearches,
+    jianbinRequests,
     hostRequests,
     logs,
     setSetting(key, value) { settings[key] = value; },
