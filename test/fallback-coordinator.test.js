@@ -216,10 +216,40 @@ test("fails loud when a provider returns an unknown classification", async () =>
   );
 });
 
+test("continues into an enabled provider after the ChKSz request budget is exhausted", async () => {
+  const host = loadFallbackHost({
+    response: (url) => {
+      if (url.pathname === "/api/163_music") return UNAVAILABLE;
+      if (url.searchParams.has("msg")) {
+        return { status: 200, body: { code: 200, list: [1, 2, 3].map((number) => ({
+          name: "晴天", singer: "周杰伦", mid: `qq-${number}`, id: `kg-${number}`,
+        })) } };
+      }
+      return { status: 200, body: {
+        code: 200, name: "晴天", singer: "周杰伦", interval: "00:01",
+        url: "https://cdn.example.test/wrong-duration.mp3",
+      } };
+    },
+  });
+  const resolved = { url: "https://fake.example.test/after-limit.mp3", quality: "hq" };
+  const provider = createFakeProvider({
+    behavior: (task) => task.stage === "cross" ? resolved : null,
+  });
+  host.fallbackProviders.push(provider);
+
+  const result = await host.handlers.musicUrl(song({}, { quality: "lq" }));
+
+  assert.deepEqual(plain(result), resolved);
+  assert.deepEqual(provider.calls.map(({ task }) => task.stage), ["same", "cross"]);
+  assert.equal(host.requests.length, 9, "one primary request plus eight ChKSz fallback requests");
+  assert.equal(host.jianbinRequests.length, 0, "the disabled built-in provider remains skipped");
+});
+
 test("keeps the built-in provider working next to an injected one", async () => {
   const t = 1_900_000_000;
   const playbackUrl = `https://www.jbsou.cn/api.php?get=url&type=wy&id=186109&sign=s1gn&t=${t}`;
   const host = loadPlugin({
+    settings: { jianbinFallback: true },
     response: UNAVAILABLE,
     jianbinResponse: (url, options) =>
       options?.method === "POST"

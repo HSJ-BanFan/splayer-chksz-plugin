@@ -5,7 +5,7 @@
 ## 行为契约（pin）
 
 1. `npm test` 现有 177 项全部保持绿，且**不得修改任何现有断言**；只允许扩展 test/plugin-host.js 的注入导出与新增测试文件。
-2. 等价回放：`C:\Users\33308\AppData\Local\Temp\fallback-equivalence\equivalence.mjs` 对 12 个场景生成归一化 transcript；重构后输出必须与 baseline-0.9.0.json 完全一致（我会在验收时运行，delegate 不必运行）。
+2. 等价回放：临时目录中的 `fallback-equivalence/equivalence.mjs` 对 12 个场景生成归一化 transcript；重构后输出必须与 baseline-0.9.0.json 完全一致（我会在验收时运行，delegate 不必运行）。
 3. 逐条保持：日志字符串、错误码/错误文案、请求顺序与参数、缓存键、预算/时间常量、音质与 expire 计算、会话失效语义。
 
 ## 非目标

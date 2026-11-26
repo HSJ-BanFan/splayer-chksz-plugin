@@ -2,7 +2,17 @@
 
 基线：v0.8.2 / 94f0c0c。测试日期：2026-10-14（Asia/Shanghai）。分支：codex/jianbin-fallback。
 
-## 自动化验证
+## 当前设置与回归（2026-11-26）
+
+`jianbinFallback` 默认关闭，需在插件设置中手动开启。开启后会向第三方 jbsou.cn 发送歌曲 ID 或歌名以查找免费源。本插件仍须配置 ChKSz API Key，煎饼通道不需要额外凭据、不消耗 ChKSz 额度。
+
+ChKSz 用尽跨平台 8 次请求或 10 秒阶段预算时，已开启的煎饼通道可以继续使用自己的剩余预算。18 秒总解析期限、取消和 ChKSz 账户错误仍会终止解析。煎饼关闭或未能成功兜底时保留 `CHKSZ_CROSS_PLATFORM_LIMIT`。
+
+新增离线回归覆盖同平台歌名与跨类型匹配的标题、版本和歌手校验，候选容错，首页与搜索的 `Retry-After`，单调冷却，阶段体检期限，共享 Cookie 的超时、取消与 403 竞态，以及第二次查询的 Cookie、输入和返回 ID。
+
+验证命令为 `npm test`、`npm run build`、`npm run check:dist`、`npm run check:artifact` 和 `npm run check`。下方真实请求与安装后播放结果是 2026-10-14 的历史记录，此次修正产物未重跑真实网络或播放器验收。
+
+## 自动化验证（2026-10-14）
 
 - 基线 158 项测试通过；新增 19 项煎饼测试后共 177 项通过。
 - `npm run build`、`check:dist`、`check:artifact`、`check` 全部通过；产物与源码字节一致。
