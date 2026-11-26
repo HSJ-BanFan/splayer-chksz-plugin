@@ -1,7 +1,14 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { setImmediate } from "node:timers/promises";
 
-import { loadPlugin } from "./plugin-host.js";
+import { loadPlugin as loadHost } from "./plugin-host.js";
+
+// Fallback scenarios explicitly opt in; privacy-default checks use loadHost directly.
+const loadPlugin = (options = {}) => loadHost({
+  ...options,
+  settings: { jianbinFallback: true, ...options.settings },
+});
 
 const START = 1_900_000_000_000;
 const UNAVAILABLE = {
@@ -46,6 +53,44 @@ const postOf = (host, predicate) =>
     request.options.method === "POST" && predicate(bodyParams(request), request),
   );
 const requestIndex = (host, predicate) => host.hostRequests.findIndex(predicate);
+
+const deferred = () => {
+  let resolve;
+  let reject;
+  const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
+  return { promise, resolve, reject };
+};
+
+const clock = () => {
+  let time = START;
+  let nextTimer = 0;
+  const pending = new Map();
+  return {
+    now: () => time,
+    timers: {
+      setTimeout(callback, delay) {
+        const id = ++nextTimer;
+        pending.set(id, { callback, at: time + delay });
+        return id;
+      },
+      clearTimeout(id) { pending.delete(id); },
+    },
+    advance(milliseconds) {
+      time += milliseconds;
+      for (const [id, timer] of pending) {
+        if (timer.at <= time) {
+          pending.delete(id);
+          timer.callback();
+        }
+      }
+    },
+  };
+};
+
+const outcome = (promise) => promise.then(
+  (value) => ({ value }),
+  (error) => ({ error }),
+);
 
 test("falls back to jianbin when the primary chksz path is unavailable", async () => {
   const t = 1_900_000_000;
@@ -200,14 +245,17 @@ test("parses mk_visit from the landing page and sends it on the form search", as
     response: UNAVAILABLE,
     jianbinResponse: (url, options) => {
       if (options?.method !== "POST") return landing("mk-visit_9");
+      if (options.headers.Cookie !== "mk_visit=mk-visit_9") {
+        return { status: 403, body: "missing cached Cookie" };
+      }
       const params = bodyParams({ options });
       const id = params.get("input");
       return searchResult([result(id, { type: "wy" })]);
     },
   });
 
-  await host.handlers.musicUrl(song());
-  await host.handlers.musicUrl(song({ id: "22831636" }));
+  const first = await host.handlers.musicUrl(song());
+  const second = await host.handlers.musicUrl(song({ id: "22831636" }));
 
   assert.deepEqual(
     host.jianbinRequests.map(({ options }) => options.method),
@@ -226,6 +274,13 @@ test("parses mk_visit from the landing page and sends it on the form search", as
     "application/x-www-form-urlencoded; charset=UTF-8",
   );
   assert.equal(post.options.body, "input=186109&filter=id&type=netease&page=1");
+  const secondPost = host.jianbinRequests[2];
+  assert.equal(secondPost.options.headers.Cookie, "mk_visit=mk-visit_9");
+  assert.equal(bodyParams(secondPost).get("input"), "22831636");
+  assert.equal(secondPost.options.body, "input=22831636&filter=id&type=netease&page=1");
+  assert.equal(first.url, jianbinUrl("wy", "186109"));
+  assert.equal(second.url, jianbinUrl("wy", "22831636"));
+  assert.equal(new URL(second.url).searchParams.get("id"), "22831636");
   assert.equal(host.deliveryProbes.length, 2);
 });
 
@@ -420,6 +475,7 @@ test("rejects foreign or mismatched api.php urls", async () => {
   ];
   for (const { name, url } of cases) {
     const host = loadPlugin({
+      settings: { economyMode: true },
       directSearchResponse: LITE_EMPTY,
       response: (url, options) => (url.pathname === "/api/163_music" ? UNAVAILABLE : EMPTY_SEARCH),
       jianbinResponse: (requestUrl, options) => {
@@ -441,6 +497,7 @@ test("rejects foreign or mismatched api.php urls", async () => {
       `case ${name}`,
     );
     assert.equal(host.deliveryProbes.length, 0, `case ${name}`);
+    assert.equal(host.jianbinRequests.length, 3, "economy budget ends after bootstrap, ID and name search");
     assert.ok(
       !host.jianbinRequests.some((request) =>
         request.options.method === "POST" && bodyParams(request).get("type") === "qq"),
@@ -556,4 +613,615 @@ test("does not run jianbin on account errors cancellation or pure delivery failu
   });
   await assert.rejects(delivery.handlers.musicUrl(song()), { code: "CHKSZ_DELIVERY_UNUSABLE" });
   assert.equal(delivery.jianbinRequests.length, 0);
+});
+
+for (const [label, singer] of [
+  ["missing singer", undefined],
+  ["empty singer", ""],
+  ["unparseable singer", " / ， & "],
+]) {
+  test(`rejects cross-type matches with ${label}`, async () => {
+    const host = loadPlugin({
+      directSearchResponse: LITE_EMPTY,
+      response: (url) => url.pathname === "/api/163_music" ? UNAVAILABLE : EMPTY_SEARCH,
+      jianbinResponse: (url, options) => {
+        if (options.method !== "POST") return landing("cookie-1");
+        return bodyParams({ options }).get("filter") === "id"
+          ? searchResult([])
+          : searchResult([result("unrelated", { artist: "Unrelated Artist" })]);
+      },
+    });
+
+    await assert.rejects(host.handlers.musicUrl(song({ singer })), {
+      code: "CHKSZ_TRACK_UNAVAILABLE",
+    });
+    assert.equal(host.deliveryProbes.length, 0, "unknown source singer cannot verify a match");
+  });
+}
+
+for (const [label, track, candidate] of [
+  ["different title and singer", {}, { name: "另一首歌", artist: "Unrelated Artist" }],
+  ["different version", {}, { name: "晴天 (Live)" }],
+  ["different singer", {}, { artist: "Unrelated Artist" }],
+  ["missing candidate singer", {}, { artist: "" }],
+  ["missing source singer", { singer: undefined }, {}],
+  ["unparseable source singer", { singer: " / ， & " }, {}],
+  ["relaxed original version", { name: "晴天 (Original ver.)" }, {}],
+]) {
+  test(`validates same-platform name fallback against ${label}`, async () => {
+    const host = loadPlugin({
+      settings: { crossPlatformFallback: false },
+      response: UNAVAILABLE,
+      jianbinResponse: (url, options) => options.method === "POST"
+        ? searchResult([result("22831636", { type: "wy", ...candidate })])
+        : landing("cookie-1"),
+    });
+
+    await assert.rejects(host.handlers.musicUrl(song({ id: "invalid-id", ...track })), {
+      code: "CHKSZ_HTTP_404",
+    });
+    assert.equal(host.deliveryProbes.length, 0, "unverified name results cannot reach delivery");
+  });
+}
+
+test("accepts a strictly matched same-platform name fallback", async () => {
+  const host = loadPlugin({
+    settings: { crossPlatformFallback: false },
+    response: UNAVAILABLE,
+    jianbinResponse: (url, options) => options.method === "POST"
+      ? searchResult([result("22831636", { type: "wy", artist: "周杰伦 / 合作者" })])
+      : landing("cookie-1"),
+  });
+
+  const resolved = await host.handlers.musicUrl(song({ id: "invalid-id" }));
+
+  assert.equal(resolved.url, jianbinUrl("wy", "22831636"));
+  assert.equal(bodyParams(host.jianbinRequests[1]).get("filter"), "name");
+  assert.equal(host.deliveryProbes.length, 1);
+});
+
+test("skips a malformed cross-type candidate URL without cooling later candidates", async () => {
+  const host = loadPlugin({
+    directSearchResponse: LITE_EMPTY,
+    response: (url) => url.pathname === "/api/163_music" ? UNAVAILABLE : EMPTY_SEARCH,
+    jianbinResponse: (url, options) => {
+      if (options.method !== "POST") return landing("cookie-1");
+      const params = bodyParams({ options });
+      if (params.get("filter") === "id") return searchResult([]);
+      return searchResult([
+        { ...result("malformed"), url: "https://[" },
+        result("valid-later"),
+      ]);
+    },
+  });
+
+  const first = await host.handlers.musicUrl(song());
+  const second = await host.handlers.musicUrl(song({ id: "22831636" }));
+
+  assert.equal(first.url, jianbinUrl("kw", "valid-later"));
+  assert.equal(second.url, first.url);
+  assert.equal(host.deliveryProbes.length, 1, "only the valid candidate is probed and cached");
+  assert.equal(host.jianbinRequests.length, 5, "candidate rejection must not cool the service");
+});
+
+test("tries later exact-ID candidates after a malformed URL", async () => {
+  const host = loadPlugin({
+    settings: { crossPlatformFallback: false },
+    response: UNAVAILABLE,
+    jianbinResponse: (url, options) => options.method === "POST"
+      ? searchResult([
+        { ...result("186109", { type: "wy" }), url: "https://[" },
+        result("186109", { type: "wy" }),
+      ])
+      : landing("cookie-1"),
+  });
+
+  const resolved = await host.handlers.musicUrl(song());
+
+  assert.equal(resolved.url, jianbinUrl("wy", "186109"));
+  assert.equal(host.deliveryProbes.length, 1);
+  assert.equal(host.jianbinRequests.length, 2);
+});
+
+test("malformed candidate URLs do not consume the economy candidate cap", async () => {
+  const host = loadPlugin({
+    settings: { economyMode: true, crossPlatformFallback: false },
+    response: UNAVAILABLE,
+    jianbinResponse: (url, options) => options.method === "POST"
+      ? searchResult([
+        { ...result("bad", { type: "wy" }), url: "https://[" },
+        result("22831636", { type: "wy" }),
+      ])
+      : landing("cookie-1"),
+  });
+
+  const resolved = await host.handlers.musicUrl(song({ id: "invalid-id" }));
+
+  assert.equal(resolved.url, jianbinUrl("wy", "22831636"));
+  assert.equal(host.deliveryProbes.length, 1);
+  assert.equal(host.hostRequests.filter(({ url }) => new URL(url).host === "www.jbsou.cn").length, 3);
+});
+
+test("an all-malformed result list leaves later search types available", async () => {
+  const host = loadPlugin({
+    directSearchResponse: LITE_EMPTY,
+    response: (url) => url.pathname === "/api/163_music" ? UNAVAILABLE : EMPTY_SEARCH,
+    jianbinResponse: (url, options) => {
+      if (options.method !== "POST") return landing("cookie-1");
+      const params = bodyParams({ options });
+      if (params.get("filter") === "id") return searchResult([]);
+      return params.get("type") === "kuwo"
+        ? searchResult([{ ...result("malformed"), url: "https://[" }])
+        : searchResult([result("qq-later", { type: "qq" })]);
+    },
+  });
+
+  const resolved = await host.handlers.musicUrl(song());
+
+  assert.equal(resolved.url, jianbinUrl("qq", "qq-later"));
+  assert.equal(host.deliveryProbes.length, 1);
+  assert.deepEqual(host.jianbinRequests.filter(({ options }) => options.method === "POST")
+    .map((request) => bodyParams(request).get("type")), ["netease", "kuwo", "qq"]);
+});
+
+test("skips invalid candidate items before a valid same-platform result", async () => {
+  const host = loadPlugin({
+    settings: { crossPlatformFallback: false },
+    response: UNAVAILABLE,
+    jianbinResponse: (url, options) => options.method === "POST"
+      ? searchResult([
+        null,
+        "invalid item",
+        { ...result("bad", { type: "wy" }), songid: { invalid: true } },
+        result("22831636", { type: "wy" }),
+      ])
+      : landing("cookie-1"),
+  });
+
+  const resolved = await host.handlers.musicUrl(song({ id: "invalid-id" }));
+
+  assert.equal(resolved.url, jianbinUrl("wy", "22831636"));
+  assert.equal(host.deliveryProbes.length, 1);
+});
+
+for (const stage of ["same", "cross"]) {
+  test(`caps delivery probes at the remaining ${stage}-type stage time`, async () => {
+    const time = clock();
+    const host = loadPlugin({
+      ...time,
+      directSearchResponse: LITE_EMPTY,
+      response: (url) => url.pathname === "/api/163_music" ? UNAVAILABLE : EMPTY_SEARCH,
+      jianbinResponse: (url, options) => {
+        if (options.method !== "POST") return landing("cookie-1");
+        const params = bodyParams({ options });
+        if (params.get("filter") === "id" && stage === "cross") return searchResult([]);
+        if (stage === "cross" && params.get("type") === "kuwo") {
+          time.advance(2_900);
+          return searchResult([]);
+        }
+        time.advance(stage === "same" ? 3_900 : 3_000);
+        return searchResult([result(stage === "same" ? "186109" : "qq-stage", {
+          type: stage === "same" ? "wy" : "qq",
+        })]);
+      },
+    });
+
+    const resolved = await host.handlers.musicUrl(song());
+
+    assert.equal(resolved.url, jianbinUrl(stage === "same" ? "wy" : "qq",
+      stage === "same" ? "186109" : "qq-stage"));
+    assert.equal(host.deliveryProbes[0].options.timeout, 100);
+  });
+}
+
+for (const provider of ["primary", "jianbin"]) {
+  test(`propagates delivery cancellation from ${provider}`, async () => {
+    const cancellation = Object.assign(new Error("cancelled probe"), { code: "PLUGIN_CANCELLED" });
+    const host = loadPlugin({
+      response: provider === "primary"
+        ? { status: 200, body: { code: 200, url: "https://cdn.example.test/song.mp3" } }
+        : UNAVAILABLE,
+      jianbinResponse: (url, options) => options.method === "POST"
+        ? searchResult([result("186109", { type: "wy" })])
+        : landing("cookie-1"),
+      probeResponse: () => { throw cancellation; },
+    });
+
+    await assert.rejects(host.handlers.musicUrl(song()), { code: "PLUGIN_CANCELLED" });
+    assert.equal(host.deliveryProbes.length, 1);
+    assert.equal(host.requests.length, provider === "primary" ? 1 : 2);
+    assert.equal(host.jianbinRequests.length, provider === "primary" ? 0 : 2);
+  });
+}
+
+for (const method of ["GET", "POST"]) {
+  for (const [label, status, retryAfter, seconds] of [
+    ["numeric seconds", 429, "300", 300],
+    ["HTTP date", 429, new Date(START + 300_000).toUTCString(), 300],
+    ["503 numeric seconds", 503, "300", 300],
+    ["503 HTTP date", 503, new Date(START + 300_000).toUTCString(), 300],
+    ["clamped numeric seconds", 429, "999999", 900],
+    ["clamped HTTP date", 429, new Date(START + 86_400_000).toUTCString(), 900],
+    ["malformed header", 429, "invalid", 60],
+    ["past HTTP date", 429, new Date(START - 1_000).toUTCString(), 60],
+    ["negative seconds", 429, "-300", 60],
+    ["zero seconds", 429, "0", 60],
+    ["malformed 503 header", 503, "invalid", 120],
+  ]) {
+    test(`honors ${method} Retry-After ${label}`, async () => {
+      const time = clock();
+      const failure = { status, headers: { "Retry-After": retryAfter }, body: "unavailable" };
+      const host = loadPlugin({
+        ...time,
+        settings: { crossPlatformFallback: false },
+        response: UNAVAILABLE,
+        jianbinResponse: (url, options) => options.method === method
+          ? failure
+          : landing("cookie-1"),
+      });
+
+      await assert.rejects(host.handlers.musicUrl(song()), { code: "CHKSZ_HTTP_404" });
+      const count = host.jianbinRequests.length;
+      assert.equal(count, method === "GET" ? 1 : 2);
+      time.advance(seconds * 1000 - 1);
+      await assert.rejects(host.handlers.musicUrl(song({ id: "22831636" })), {
+        code: "CHKSZ_HTTP_404",
+      });
+      assert.equal(host.jianbinRequests.length, count, "Retry-After must prevent early traffic");
+      time.advance(2);
+      await assert.rejects(host.handlers.musicUrl(song({ id: "100" })), {
+        code: "CHKSZ_HTTP_404",
+      });
+      assert.equal(host.jianbinRequests.length, count + 1, "cooldown must expire at its deadline");
+    });
+  }
+}
+
+test("a concurrent shorter service failure cannot shorten a longer cooldown", async () => {
+  const time = clock();
+  const firstPost = deferred();
+  const secondPost = deferred();
+  const firstReady = deferred();
+  const secondReady = deferred();
+  const host = loadPlugin({
+    ...time,
+    settings: { crossPlatformFallback: false },
+    response: UNAVAILABLE,
+    jianbinResponse: (url, options) => {
+      if (options.method !== "POST") return landing("cookie-1");
+      const id = bodyParams({ options }).get("input");
+      if (id === "186109") { firstReady.resolve(); return firstPost.promise; }
+      if (id === "22831636") { secondReady.resolve(); return secondPost.promise; }
+      return searchResult([]);
+    },
+  });
+
+  const first = outcome(host.handlers.musicUrl(song()));
+  await firstReady.promise;
+  const second = outcome(host.handlers.musicUrl(song({ id: "22831636" })));
+  await secondReady.promise;
+  firstPost.resolve({ status: 429, headers: { "Retry-After": "600" }, body: "limited" });
+  assert.equal((await first).error.code, "CHKSZ_HTTP_404");
+  secondPost.resolve({ status: 503, body: "unavailable" });
+  assert.equal((await second).error.code, "CHKSZ_HTTP_404");
+  const count = host.jianbinRequests.length;
+
+  time.advance(121_000);
+  await assert.rejects(host.handlers.musicUrl(song({ id: "300" })), { code: "CHKSZ_HTTP_404" });
+  assert.equal(host.jianbinRequests.length, count, "503 must preserve the active 600s deadline");
+  time.advance(479_001);
+  await assert.rejects(host.handlers.musicUrl(song({ id: "400" })), { code: "CHKSZ_HTTP_404" });
+  assert.equal(host.jianbinRequests.length, count + 1);
+});
+
+for (const deadline of ["stage", "overall"]) {
+  test(`a short ${deadline} waiter cannot fail the shared cookie bootstrap`, async () => {
+    const time = clock();
+    const page = deferred();
+    const ready = deferred();
+    let landingCount = 0;
+    let firstPrimary = true;
+    const host = loadPlugin({
+      ...time,
+      settings: { crossPlatformFallback: false, smartCache: false },
+      response: () => {
+        if (deadline === "overall" && firstPrimary) time.advance(17_900);
+        firstPrimary = false;
+        return UNAVAILABLE;
+      },
+      jianbinResponse: (url, options) => {
+        if (options.method !== "POST") {
+          landingCount += 1;
+          if (deadline === "stage" && landingCount === 1) return landing("cookie-1");
+          ready.resolve();
+          return page.promise;
+        }
+        const id = bodyParams({ options }).get("input");
+        if (deadline === "stage" && options.headers.Cookie === "mk_visit=cookie-1") {
+          time.advance(3_900);
+          return { status: 403, body: "refresh needed" };
+        }
+        return searchResult([result(id, { type: "wy" })]);
+      },
+    });
+
+    const first = outcome(host.handlers.musicUrl(song()));
+    await ready.promise;
+    const second = outcome(host.handlers.musicUrl(song({ id: "22831636" })));
+    await setImmediate();
+    time.advance(100);
+    const firstResult = await first;
+    page.resolve(landing("cookie-2"));
+    const secondResult = await second;
+
+    assert.equal(secondResult.error, undefined, "healthy waiter must survive the other caller's timeout");
+    assert.equal(secondResult.value.url, jianbinUrl("wy", "22831636"));
+    assert.equal(firstResult.error.code, deadline === "overall"
+      ? "CHKSZ_RESOLUTION_TIMEOUT" : "CHKSZ_HTTP_404");
+    assert.equal(host.jianbinRequests.filter(({ options }) => options.method === "GET").at(-1)
+      .options.timeout, 4_000, "shared network timeout belongs to the bootstrap operation");
+    assert.equal(landingCount, deadline === "stage" ? 2 : 1);
+    assert.equal(host.deliveryProbes.length, 1);
+  });
+}
+
+test("only the initiating waiter receives a host-cancelled cookie bootstrap", async () => {
+  const page = deferred();
+  const ready = deferred();
+  let landingCount = 0;
+  const host = loadPlugin({
+    settings: { crossPlatformFallback: false },
+    response: UNAVAILABLE,
+    jianbinResponse: (url, options) => {
+      if (options.method !== "POST") {
+        landingCount += 1;
+        if (landingCount > 1) return landing("cookie-2");
+        ready.resolve();
+        return page.promise;
+      }
+      const id = bodyParams({ options }).get("input");
+      return searchResult([result(id, { type: "wy" })]);
+    },
+  });
+
+  const first = outcome(host.handlers.musicUrl(song()));
+  await ready.promise;
+  const second = outcome(host.handlers.musicUrl(song({ id: "22831636" })));
+  await setImmediate();
+  page.reject(Object.assign(new Error("initiating request cancelled"), { code: "PLUGIN_CANCELLED" }));
+  const [firstResult, secondResult] = await Promise.all([first, second]);
+
+  assert.equal(firstResult.error.code, "PLUGIN_CANCELLED");
+  assert.equal(secondResult.error, undefined, "live waiters may retry a cancelled owner's bootstrap");
+  assert.equal(secondResult.value.url, jianbinUrl("wy", "22831636"));
+  assert.equal(landingCount, 2);
+  assert.equal(host.jianbinRequests.filter(({ options }) => options.method === "POST").length, 1);
+});
+
+test("charges each shared-bootstrap waiter against its own economy request budget", async () => {
+  const page = deferred();
+  const ready = deferred();
+  let landingCount = 0;
+  const host = loadPlugin({
+    settings: { crossPlatformFallback: false, economyMode: true },
+    response: UNAVAILABLE,
+    jianbinResponse: (url, options) => {
+      if (options.method !== "POST") {
+        landingCount += 1;
+        if (landingCount > 1) return landing("cookie-2");
+        ready.resolve();
+        return page.promise;
+      }
+      const id = bodyParams({ options }).get("input");
+      return id === "22831636" && options.headers.Cookie === "mk_visit=cookie-1"
+        ? { status: 403, body: "refresh needed" }
+        : searchResult([result(id, { type: "wy" })]);
+    },
+  });
+
+  const first = outcome(host.handlers.musicUrl(song()));
+  await ready.promise;
+  const second = outcome(host.handlers.musicUrl(song({ id: "22831636" })));
+  await setImmediate();
+  page.resolve(landing("cookie-1"));
+  const [firstResult, secondResult] = await Promise.all([first, second]);
+
+  assert.equal(firstResult.value.url, jianbinUrl("wy", "186109"));
+  assert.equal(secondResult.error.code, "CHKSZ_HTTP_404");
+  assert.equal(host.jianbinRequests.filter((request) => request.options.method === "POST" &&
+    bodyParams(request).get("input") === "22831636").length, 1,
+  "shared GET + first POST + refresh GET exhaust the caller's three requests");
+});
+
+test("a stale 403 cannot discard the cookie refreshed by another request", async () => {
+  const delayed = deferred();
+  const ready = deferred();
+  let landingCount = 0;
+  const host = loadPlugin({
+    settings: { crossPlatformFallback: false },
+    response: UNAVAILABLE,
+    jianbinResponse: (url, options) => {
+      if (options.method !== "POST") return landing(`cookie-${++landingCount}`);
+      const id = bodyParams({ options }).get("input");
+      if (options.headers.Cookie === "mk_visit=cookie-1") {
+        if (id === "186109") { ready.resolve(); return delayed.promise; }
+        return { status: 403, body: "expired cookie" };
+      }
+      return searchResult([result(id, { type: "wy" })]);
+    },
+  });
+
+  const first = outcome(host.handlers.musicUrl(song()));
+  await ready.promise;
+  const second = await host.handlers.musicUrl(song({ id: "22831636" }));
+  delayed.resolve({ status: 403, body: "delayed expired cookie" });
+  const firstResult = await first;
+
+  assert.equal(second.url, jianbinUrl("wy", "22831636"));
+  assert.equal(firstResult.value.url, jianbinUrl("wy", "186109"));
+  assert.equal(landingCount, 2, "a delayed cookie-1 failure must reuse cookie-2");
+  assert.equal(host.jianbinRequests.at(-1).options.headers.Cookie, "mk_visit=cookie-2");
+});
+
+test("shared bootstrap results cannot populate a replacement configuration session", async () => {
+  const page = deferred();
+  const ready = deferred();
+  let landingCount = 0;
+  const host = loadPlugin({
+    settings: { crossPlatformFallback: false },
+    response: UNAVAILABLE,
+    jianbinResponse: (url, options) => {
+      if (options.method !== "POST") {
+        landingCount += 1;
+        if (landingCount > 1) return landing("cookie-new");
+        ready.resolve();
+        return page.promise;
+      }
+      return searchResult([result(bodyParams({ options }).get("input"), { type: "wy" })]);
+    },
+  });
+
+  const first = outcome(host.handlers.musicUrl(song()));
+  await ready.promise;
+  const second = outcome(host.handlers.musicUrl(song({ id: "22831636" })));
+  await setImmediate();
+  host.setSetting("apiKey", "chksz_replaced_key");
+  page.resolve(landing("cookie-old"));
+  const results = await Promise.all([first, second]);
+
+  assert.deepEqual(results.map(({ error }) => error.code), ["CHKSZ_CONFIG_CHANGED", "CHKSZ_CONFIG_CHANGED"]);
+  assert.equal(host.jianbinRequests.length, 1, "old session must not search with its cookie");
+  const resolved = await host.handlers.musicUrl(song({ id: "300" }));
+  assert.equal(resolved.url, jianbinUrl("wy", "300"));
+  assert.equal(landingCount, 2);
+  assert.equal(host.jianbinRequests.at(-1).options.headers.Cookie, "mk_visit=cookie-new");
+});
+
+for (const [label, settings] of [
+  ["unset", {}],
+  ["null", { jianbinFallback: null }],
+  ["empty", { jianbinFallback: "" }],
+  ["false", { jianbinFallback: false }],
+]) {
+  test(`sends no Jianbin traffic when the opt-in is ${label}`, async () => {
+    const host = loadHost({
+      settings,
+      directSearchResponse: LITE_EMPTY,
+      response: (url) => url.pathname === "/api/163_music" ? UNAVAILABLE : EMPTY_SEARCH,
+      jianbinResponse: (url, options) => options.method === "POST"
+        ? searchResult([result("186109", { type: "wy" })])
+        : landing("cookie-1"),
+    });
+
+    await assert.rejects(host.handlers.musicUrl(song()), { code: "CHKSZ_TRACK_UNAVAILABLE" });
+    assert.equal(host.registration.settings.find(({ key }) => key === "jianbinFallback").default, false);
+    assert.equal(host.jianbinRequests.length, 0, "metadata must stay off the free channel until opt-in");
+  });
+}
+
+test("an opted-in Jianbin fallback still requires the ChKSz API key", async () => {
+  const host = loadPlugin({ apiKey: "", response: UNAVAILABLE });
+
+  await assert.rejects(host.handlers.musicUrl(song()), { code: "CHKSZ_CONFIG_MISSING" });
+  assert.equal(host.hostRequests.length, 0);
+});
+
+const chkszRequestLimit = (url) => {
+  if (url.pathname === "/api/163_music") return UNAVAILABLE;
+  if (url.searchParams.has("msg")) {
+    return { status: 200, body: { code: 200, list: [1, 2, 3].map((number) => ({
+      name: "晴天", singer: "周杰伦", mid: `qq-${number}`, id: `kg-${number}`,
+    })) } };
+  }
+  // Successful responses with a different duration reject candidates without a
+  // provider error taking precedence over the exhausted ChKSz request budget.
+  return { status: 200, body: {
+    code: 200, name: "晴天", singer: "周杰伦", interval: "00:01",
+    url: `https://cdn.example.test/${url.searchParams.get("mid") ?? url.searchParams.get("id")}.mp3`,
+  } };
+};
+
+test("continues into opted-in Jianbin after eight ChKSz cross-platform requests", async () => {
+  const host = loadPlugin({
+    response: chkszRequestLimit,
+    jianbinResponse: (url, options) => {
+      if (options.method !== "POST") return landing("cookie-1");
+      return bodyParams({ options }).get("filter") === "id"
+        ? searchResult([])
+        : searchResult([result("kw-after-limit")]);
+    },
+  });
+
+  const resolved = await host.handlers.musicUrl(song({}, { quality: "lq" }));
+
+  assert.equal(resolved.url, jianbinUrl("kw", "kw-after-limit"));
+  assert.equal(host.requests.length, 9, "one primary request plus exactly eight cross-platform requests");
+  assert.deepEqual(host.jianbinRequests.map(({ options }) => options.method), ["GET", "POST", "POST"]);
+  assert.equal(bodyParams(host.jianbinRequests.at(-1)).get("filter"), "name");
+});
+
+for (const [label, settings] of [["disabled", { jianbinFallback: false }], ["default", {}]]) {
+  test(`preserves the ChKSz limit error with Jianbin ${label}`, async () => {
+    const host = loadHost({ settings, response: chkszRequestLimit });
+
+    await assert.rejects(host.handlers.musicUrl(song({}, { quality: "lq" })), {
+      code: "CHKSZ_CROSS_PLATFORM_LIMIT",
+    });
+    assert.equal(host.requests.length, 9);
+    assert.equal(host.jianbinRequests.length, 0);
+  });
+}
+
+test("preserves the ChKSz limit error when the independent Jianbin fallback also misses", async () => {
+  const host = loadPlugin({
+    response: chkszRequestLimit,
+    jianbinResponse: (url, options) => options.method === "POST" ? searchResult([]) : landing("cookie-1"),
+  });
+
+  await assert.rejects(host.handlers.musicUrl(song({}, { quality: "lq" })), (error) =>
+    error.code === "CHKSZ_CROSS_PLATFORM_LIMIT" && error.message.includes("煎饼免费源已尝试"));
+  assert.equal(host.requests.length, 9);
+  assert.equal(host.jianbinRequests.length, 5, "same-type lookup plus all three cross-type searches");
+});
+
+test("continues into Jianbin after the ChKSz ten-second stage expires", async () => {
+  const time = clock();
+  const host = loadPlugin({
+    ...time,
+    settings: { directSearchFallback: false },
+    response: (url) => {
+      if (url.pathname === "/api/163_music") return UNAVAILABLE;
+      time.advance(10_001);
+      return EMPTY_SEARCH;
+    },
+    jianbinResponse: (url, options) => {
+      if (options.method !== "POST") return landing("cookie-1");
+      return bodyParams({ options }).get("filter") === "id"
+        ? searchResult([]) : searchResult([result("kw-after-time-limit")]);
+    },
+  });
+
+  const resolved = await host.handlers.musicUrl(song());
+
+  assert.equal(resolved.url, jianbinUrl("kw", "kw-after-time-limit"));
+  assert.equal(host.requests.filter(({ url }) => new URL(url).searchParams.has("msg")).length, 1);
+  assert.equal(host.deliveryProbes.length, 1);
+});
+
+test("ChKSz stage exhaustion cannot bypass the overall resolution deadline", async () => {
+  const time = clock();
+  const host = loadPlugin({
+    ...time,
+    settings: { directSearchFallback: false },
+    response: (url) => {
+      if (url.pathname === "/api/163_music") return UNAVAILABLE;
+      time.advance(18_000);
+      return EMPTY_SEARCH;
+    },
+    jianbinResponse: (url, options) => options.method === "POST" ? searchResult([]) : landing("cookie-1"),
+  });
+
+  await assert.rejects(host.handlers.musicUrl(song()), { code: "CHKSZ_RESOLUTION_TIMEOUT" });
+  assert.equal(host.jianbinRequests.length, 2, "only the earlier same-type lookup ran");
+  assert.equal(host.deliveryProbes.length, 0);
 });

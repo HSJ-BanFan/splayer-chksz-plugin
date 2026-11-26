@@ -17,6 +17,7 @@ export const loadPlugin = ({
   directSearchResponse,
   jianbinResponse,
   now = () => Date.now(),
+  timers = { setTimeout, clearTimeout },
   sourceText = pluginSource,
 } = {}) => {
   const registration = {};
@@ -92,8 +93,8 @@ export const loadPlugin = ({
     URL,
     Promise,
     console,
-    setTimeout,
-    clearTimeout,
+    setTimeout: timers.setTimeout,
+    clearTimeout: timers.clearTimeout,
     Date: class extends Date { static now() { return now(); } },
   };
   vm.runInNewContext(
