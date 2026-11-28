@@ -7,6 +7,8 @@ description: Use when validating this project's plugin inside the installed SPla
 
 Prefer the application's local MCP over UI clicking for playback validation. An isolated VM resolving a URL is not evidence that the installed app played it.
 
+For current plugin features, source entries, and safe offline checks, read the [Feature Map](references/feature-map.md). Use its evidence boundaries when selecting a real-app test.
+
 ## Preconditions and connection
 
 1. Confirm the installed plugin version and, where accessible, its script hash against `dist/chksz.splayer-source.js`. A built artifact is not automatically installed. Ask before replacing the installed plugin; preserve settings and do not silently run market updates.
